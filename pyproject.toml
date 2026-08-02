@@ -1,6 +1,6 @@
 [project]
 name = "umeko-serial-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Serial Hub + MCP thin client: shared COM port, web monitor, Codex tools"
 readme = "README.md"
 license = "MIT"

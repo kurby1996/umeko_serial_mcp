@@ -2,111 +2,645 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>串口 Hub 监控面板</title>
     <style>
+        :root {
+            --bg: #14161a;
+            --panel: #1c1f26;
+            --panel-2: #22262e;
+            --border: #333a45;
+            --border-soft: #2a303a;
+            --text: #e6e8ec;
+            --muted: #8b93a7;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --ok: #34d399;
+            --bad: #f87171;
+            --warn: #fbbf24;
+            --ai: #c084fc;
+            --hw: #2dd4bf;
+            --user: #fb923c;
+            --sys: #94a3b8;
+            --hex: #eab308;
+            --input-bg: #0f1218;
+            --radius: 10px;
+            --log-font-size: 13px;
+            --ui-font-size: 13px;
+            --shadow: 0 4px 24px rgba(0,0,0,.35);
+        }
+        * { box-sizing: border-box; }
+        html, body { height: 100%; }
         body {
-            background-color: #1e1e1e;
-            color: #d4d4d4;
-            font-family: 'Consolas', 'Monaco', 'Courier New', 'Microsoft YaHei Mono', 'Microsoft YaHei', monospace;
             margin: 0;
-            padding: 10px 12px;
+            padding: 14px 16px 16px;
+            background: radial-gradient(1200px 600px at 10% -10%, #1a2740 0%, transparent 50%),
+                        radial-gradient(900px 500px at 100% 0%, #1a2030 0%, transparent 45%),
+                        var(--bg);
+            color: var(--text);
+            font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei",
+                         Consolas, Monaco, "Courier New", monospace;
+            font-size: var(--ui-font-size);
             display: flex;
             flex-direction: column;
-            height: 100vh;
-            box-sizing: border-box;
-            font-size: 13px;
+            gap: 10px;
+            min-height: 100vh;
         }
-        h2 { color: #569cd6; margin: 0 0 6px 0; font-size: 16px; }
-        .hint { color: #858585; font-size: 12px; margin: 0 0 8px 0; }
-        .serial-panel {
-            display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
-            margin-bottom: 8px; padding: 6px 8px;
-            background-color: #252526; border: 1px solid #444; border-radius: 4px;
+        .topbar {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
         }
-        .serial-panel label { font-weight: bold; white-space: nowrap; }
-        .serial-panel input[type="text"] {
-            min-width: 120px; flex: 1; padding: 4px 6px;
-            background-color: #1e1e1e; color: #fff; border: 1px solid #3c3c3c;
-            font-family: inherit; font-size: 13px; border-radius: 3px;
+        .brand h1 {
+            margin: 0;
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: .02em;
+            color: #93c5fd;
         }
-        .serial-panel select {
-            padding: 4px 6px; background-color: #1e1e1e; color: #fff;
-            border: 1px solid #3c3c3c; font-family: inherit; font-size: 13px;
-            border-radius: 3px; max-width: 280px;
+        .brand p {
+            margin: 4px 0 0;
+            color: var(--muted);
+            font-size: 12px;
+            line-height: 1.45;
+            max-width: 720px;
         }
-        .serial-panel button {
-            padding: 4px 14px; background-color: #0e639c; color: white;
-            border: none; cursor: pointer; font-weight: bold; border-radius: 3px; font-size: 13px;
+        .ws-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: var(--panel);
+            font-size: 12px;
+            white-space: nowrap;
+            box-shadow: var(--shadow);
         }
-        .serial-panel button.secondary { background-color: #3c3c3c; }
-        .serial-panel button:hover { filter: brightness(1.15); }
-        .status-label { min-width: 200px; }
-        .status-connected { color: #4ec9b0; }
-        .status-disconnected { color: #f48771; }
+        .ws-pill .dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--bad);
+            box-shadow: 0 0 0 3px rgba(248,113,113,.15);
+        }
+        .ws-pill.ok .dot {
+            background: var(--ok);
+            box-shadow: 0 0 0 3px rgba(52,211,153,.18);
+        }
+        .ws-pill.bad { color: var(--bad); }
+        .ws-pill.ok { color: var(--ok); }
+        .banner-warn {
+            display: none;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 10px 12px;
+            border-radius: var(--radius);
+            border: 1px solid rgba(251,191,36,.45);
+            background: rgba(251,191,36,.12);
+            color: #fde68a;
+            font-size: 12px;
+            line-height: 1.45;
+        }
+        .banner-warn.show { display: flex; }
+        .banner-warn strong { color: #fbbf24; }
+
+        .card {
+            background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+            border: 1px solid var(--border-soft);
+            border-radius: var(--radius);
+            padding: 10px 12px;
+            box-shadow: var(--shadow);
+        }
+        .row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+        }
+        .row + .row { margin-top: 10px; }
+        .status-chip {
+            min-width: 168px;
+            padding: 7px 12px;
+            border-radius: 8px;
+            font-weight: 700;
+            border: 1px solid var(--border);
+            background: var(--input-bg);
+        }
+        .status-chip.on { color: var(--ok); border-color: rgba(52,211,153,.35); }
+        .status-chip.off { color: var(--bad); border-color: rgba(248,113,113,.3); }
+
+        .field {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .field > span, .lbl {
+            color: var(--muted);
+            font-size: 12px;
+            white-space: nowrap;
+        }
+        select, input[type="text"], input[type="number"] {
+            background: var(--input-bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 7px 10px;
+            font-family: inherit;
+            font-size: var(--ui-font-size);
+            outline: none;
+            transition: border-color .15s, box-shadow .15s;
+        }
+        select:hover, input[type="text"]:hover, input[type="number"]:hover {
+            border-color: #4b5568;
+        }
+        select:focus, input[type="text"]:focus, input[type="number"]:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(59,130,246,.2);
+        }
+        select:disabled, input:disabled {
+            opacity: .55;
+            cursor: not-allowed;
+        }
+
+        /* 串口下拉加宽 */
+        #serial-port-select {
+            min-width: 320px;
+            width: min(480px, 42vw);
+            max-width: 100%;
+        }
+        #serial-port-input {
+            min-width: 120px;
+            width: 140px;
+        }
+        #serial-baud-select { min-width: 100px; }
+        #serial-encoding-select { min-width: 110px; }
+        #period-ms { width: 88px; }
+
+        .btn {
+            border: none;
+            border-radius: 8px;
+            padding: 7px 14px;
+            font-weight: 650;
+            font-size: var(--ui-font-size);
+            font-family: inherit;
+            cursor: pointer;
+            color: #fff;
+            background: var(--accent);
+            transition: filter .12s, transform .08s;
+        }
+        .btn:hover { filter: brightness(1.08); }
+        .btn:active { transform: translateY(1px); }
+        .btn:disabled { opacity: .45; cursor: not-allowed; }
+        .btn.secondary {
+            background: #374151;
+            color: #e5e7eb;
+        }
+        .btn.ghost {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text);
+        }
+        .btn.danger { background: #dc2626; }
+        .btn.ok { background: #059669; }
+        .btn.cycle-on {
+            background: #84cc16;
+            color: #14532d;
+        }
+
+        .divider {
+            width: 1px;
+            height: 22px;
+            background: var(--border);
+            margin: 0 2px;
+        }
+        .spacer { flex: 1; min-width: 8px; }
+
+        .chk {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--text);
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+        .chk input { accent-color: var(--accent); width: 15px; height: 15px; }
+
+        input[type="range"] {
+            width: 120px;
+            accent-color: var(--accent);
+        }
+
         #log-container {
-            flex: 1; background-color: #000; border: 1px solid #444;
-            padding: 6px 8px; overflow-y: auto; margin-bottom: 10px;
-            border-radius: 4px; font-size: 13px; line-height: 1.35;
+            flex: 1;
+            min-height: 220px;
+            background: #07090d;
+            border: 1px solid var(--border-soft);
+            border-radius: var(--radius);
+            padding: 10px 12px;
+            overflow-y: auto;
+            font-family: Consolas, "Cascadia Mono", "Microsoft YaHei Mono", monospace;
+            font-size: var(--log-font-size);
+            line-height: 1.45;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,.02);
         }
-        .log-entry { margin-bottom: 2px; }
-        .timestamp { color: #858585; }
-        .msg-content { white-space: pre-wrap; word-break: break-word; }
-        .source-LLM { color: #c586c0; font-weight: bold; }
-        .source-HARDWARE { color: #4ec9b0; font-weight: bold; }
-        .source-USER_OVERRIDE { color: #ce9178; font-weight: bold; }
-        .source-SYSTEM { color: #808080; font-style: italic; }
-        .controls { display: flex; gap: 8px; }
-        .controls input[type="text"] {
-            flex: 1; padding: 6px 8px; background-color: #252526; color: #fff;
-            border: 1px solid #3c3c3c; font-family: inherit; font-size: 13px; border-radius: 3px;
+        #log-container::-webkit-scrollbar { width: 10px; }
+        #log-container::-webkit-scrollbar-thumb {
+            background: #2f3642; border-radius: 8px;
         }
-        .controls button {
-            padding: 6px 14px; background-color: #0e639c; color: white;
-            border: none; cursor: pointer; font-weight: bold; border-radius: 3px; font-size: 13px;
+        .log-entry { margin-bottom: 3px; word-break: break-word; }
+        .timestamp { color: #6b7280; }
+        .msg-content { white-space: pre-wrap; }
+        .msg-hex { color: var(--hex); }
+        .source-LLM { color: var(--ai); font-weight: 700; }
+        .source-HARDWARE { color: var(--hw); font-weight: 700; }
+        .source-USER_OVERRIDE { color: var(--user); font-weight: 700; }
+        .source-SYSTEM { color: var(--sys); font-style: italic; }
+
+        .send-bar {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 10px;
+            align-items: stretch;
         }
-        .status { position: absolute; top: 12px; right: 12px; font-size: 12px; text-align: right; }
-        .status.connected { color: #4ec9b0; }
-        .status.disconnected { color: #f48771; }
+        .send-opts {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px 10px;
+            align-items: center;
+        }
+        .send-main {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            min-width: 0;
+        }
+        #cmd-input {
+            flex: 1;
+            min-width: 160px;
+            padding: 10px 12px;
+            background: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-family: inherit;
+            font-size: var(--ui-font-size);
+        }
+        .send-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        /* 发送 Tab */
+        .tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 10px;
+            border-bottom: 1px solid var(--border-soft);
+            padding-bottom: 0;
+        }
+        .tab-btn {
+            background: transparent;
+            border: none;
+            border-bottom: 2px solid transparent;
+            color: var(--muted);
+            padding: 8px 14px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: var(--ui-font-size);
+            font-weight: 650;
+            margin-bottom: -1px;
+            border-radius: 8px 8px 0 0;
+        }
+        .tab-btn:hover { color: var(--text); background: rgba(255,255,255,.03); }
+        .tab-btn.active {
+            color: #93c5fd;
+            border-bottom-color: var(--accent);
+            background: rgba(59,130,246,.08);
+        }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+
+        .multi-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px 12px;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .multi-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 220px;
+            overflow-y: auto;
+            padding: 4px 2px;
+        }
+        .multi-row {
+            display: grid;
+            grid-template-columns: 28px 32px 1fr 72px 56px;
+            gap: 8px;
+            align-items: center;
+        }
+        .multi-row .idx {
+            color: var(--muted);
+            font-size: 12px;
+            text-align: center;
+        }
+        .multi-row input[type="text"] {
+            width: 100%;
+            min-width: 0;
+            padding: 6px 8px;
+            background: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-family: inherit;
+            font-size: var(--ui-font-size);
+        }
+        .multi-row .mini-chk {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: var(--muted);
+            font-size: 12px;
+            white-space: nowrap;
+        }
+        .multi-row .mini-chk input { accent-color: var(--accent); }
+        .multi-pager {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+        .multi-row.sending {
+            outline: 1px solid rgba(59,130,246,.45);
+            border-radius: 8px;
+            background: rgba(59,130,246,.06);
+        }
+
+        /* 多条发送弹窗 */
+        .modal-mask {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,.55);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .modal-mask.open { display: flex; }
+        .modal {
+            width: min(920px, 96vw);
+            max-height: min(88vh, 820px);
+            background: linear-gradient(180deg, #1c1f26 0%, #171a21 100%);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            box-shadow: 0 20px 60px rgba(0,0,0,.55);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .modal-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-soft);
+        }
+        .modal-head h3 {
+            margin: 0;
+            font-size: 16px;
+            color: #93c5fd;
+        }
+        .modal-body {
+            padding: 12px 16px;
+            overflow: auto;
+            flex: 1;
+        }
+        .modal-foot {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+            padding: 12px 16px;
+            border-top: 1px solid var(--border-soft);
+            background: rgba(0,0,0,.15);
+        }
+        .modal .multi-list { max-height: none; }
+        .modal .multi-row {
+            grid-template-columns: 28px 36px 1fr 70px 52px;
+        }
+
+        @media (max-width: 900px) {
+            #serial-port-select {
+                min-width: 100%;
+                width: 100%;
+            }
+            .send-bar { grid-template-columns: 1fr; }
+            .multi-row {
+                grid-template-columns: 24px 28px 1fr;
+            }
+            .multi-row .mini-chk { grid-column: 3; }
+            .modal .multi-row {
+                grid-template-columns: 24px 28px 1fr;
+            }
+        }
     </style>
 </head>
 <body>
-    <h2>串口 Hub 监控面板</h2>
-    <div id="ws-status" class="status disconnected">WebSocket: 连接中...</div>
-    <p class="hint">
-        常驻 Hub 独占串口；Codex MCP 与网页共用同一缓冲。
-        中文/XCOM 请选 GBK。WebSocket 会自动重连，保持页面打开即可长连。
-    </p>
+    <div class="topbar">
+        <div class="brand">
+            <h1>串口 Hub 监控面板 <span id="ui-version-label" style="font-size:12px;color:var(--muted);font-weight:500"></span></h1>
+            <p>常驻 Hub 独占串口；与 Codex MCP 共用缓冲。支持文本/HEX、结尾符、校验、周期发送、日志导出。改代码后请重启 Hub。</p>
+        </div>
+        <div id="ws-status" class="ws-pill bad">
+            <span class="dot"></span>
+            <span id="ws-status-text">WebSocket: 连接中...</span>
+        </div>
+    </div>
+    <div id="version-banner" class="banner-warn" role="alert"></div>
 
-    <div class="serial-panel">
-        <label id="serial-status-label" class="status-label status-disconnected">串口: 未连接</label>
-        <select id="serial-port-select" title="本机串口"><option value="">扫描中...</option></select>
-        <button type="button" class="secondary" id="refresh-ports-btn" onclick="refreshPorts()">刷新串口</button>
-        <input type="text" id="serial-port-input" placeholder="手动输入，如 COM1" value="">
-        <select id="serial-baud-select">
-            <option value="9600">9600</option>
-            <option value="115200" selected>115200</option>
-            <option value="230400">230400</option>
-            <option value="460800">460800</option>
-            <option value="921600">921600</option>
-        </select>
-        <select id="serial-encoding-select" title="串口文本编码">
-            <option value="utf-8">UTF-8</option>
-            <option value="gbk">GBK</option>
-            <option value="gb18030">GB18030</option>
-        </select>
-        <button id="serial-toggle-btn" onclick="toggleSerial()">连接</button>
-        <button type="button" class="secondary" onclick="clearLog()">清屏</button>
+    <!-- 连接 -->
+    <div class="card">
+        <div class="row">
+            <div id="serial-status-label" class="status-chip off">串口: 未连接</div>
+
+            <div class="field">
+                <span class="lbl">串口</span>
+                <select id="serial-port-select" title="本机串口列表（含描述）">
+                    <option value="">扫描中...</option>
+                </select>
+            </div>
+            <button type="button" class="btn secondary" id="refresh-ports-btn" onclick="refreshPorts()">刷新</button>
+            <div class="field">
+                <span class="lbl">手动</span>
+                <input type="text" id="serial-port-input" placeholder="COM1" title="也可手动输入端口名">
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="field">
+                <span class="lbl">波特率</span>
+                <select id="serial-baud-select">
+                    <option value="9600">9600</option>
+                    <option value="19200">19200</option>
+                    <option value="38400">38400</option>
+                    <option value="57600">57600</option>
+                    <option value="115200" selected>115200</option>
+                    <option value="230400">230400</option>
+                    <option value="460800">460800</option>
+                    <option value="921600">921600</option>
+                </select>
+            </div>
+            <div class="field">
+                <span class="lbl">编码</span>
+                <select id="serial-encoding-select" title="中文固件/XCOM 常用 GBK">
+                    <option value="utf-8">UTF-8</option>
+                    <option value="gbk">GBK</option>
+                    <option value="gb18030">GB18030</option>
+                </select>
+            </div>
+
+            <button id="serial-toggle-btn" class="btn" onclick="toggleSerial()">连接</button>
+            <div class="spacer"></div>
+            <button type="button" class="btn ghost" onclick="clearLog()">清屏</button>
+            <button type="button" class="btn ok" id="export-btn" onclick="exportLogs()" title="导出缓冲日志为 TXT，可选择保存位置">导出 TXT</button>
+        </div>
+    </div>
+
+    <!-- 显示 -->
+    <div class="card">
+        <div class="row">
+            <span class="lbl" style="font-weight:700;color:#93c5fd">显示</span>
+            <div class="field">
+                <span>日志字号</span>
+                <input type="range" id="font-size-range" min="10" max="24" value="13">
+                <span id="font-size-label">13px</span>
+            </div>
+            <div class="field">
+                <span>接收显示</span>
+                <select id="rx-display-mode">
+                    <option value="text" selected>文本</option>
+                    <option value="hex">HEX</option>
+                    <option value="both">文本 + HEX</option>
+                </select>
+            </div>
+            <label class="chk"><input type="checkbox" id="auto-scroll" checked> 自动滚动</label>
+            <div class="spacer"></div>
+            <span class="lbl" id="log-count-label">日志: 0 条</span>
+        </div>
     </div>
 
     <div id="log-container"></div>
-    <div class="controls">
-        <input type="text" id="cmd-input" placeholder="输入指令 (↑↓ 历史，Enter 发送)..." autocomplete="off">
-        <button onclick="sendCommand()">发送 (网页)</button>
+
+    <!-- 发送 -->
+    <div class="card">
+        <!-- 公共发送选项 -->
+        <div class="send-opts">
+            <span class="lbl" style="font-weight:700;color:#93c5fd">发送</span>
+            <div class="field">
+                <span>模式</span>
+                <select id="tx-mode">
+                    <option value="text" selected>文本</option>
+                    <option value="hex">HEX</option>
+                </select>
+            </div>
+            <div class="field">
+                <span>结尾</span>
+                <select id="tx-eol">
+                    <option value="none">无</option>
+                    <option value="cr">CR</option>
+                    <option value="lf">LF</option>
+                    <option value="crlf" selected>CRLF</option>
+                </select>
+            </div>
+            <div class="field">
+                <span>校验</span>
+                <select id="tx-checksum">
+                    <option value="none" selected>无</option>
+                    <option value="sum8">SUM8</option>
+                    <option value="xor">XOR8</option>
+                    <option value="crc16_modbus">CRC16-Modbus</option>
+                </select>
+            </div>
+            <div class="field">
+                <span>周期</span>
+                <input type="number" id="period-ms" min="10" step="10" value="1000">
+                <span>ms</span>
+            </div>
+            <button type="button" class="btn secondary" id="open-multi-btn" onclick="openMultiModal()">多条发送...</button>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+            <div class="send-main" style="flex:1;min-width:0">
+                <input type="text" id="cmd-input" placeholder="输入内容 (发送后保留，Enter 发送，↑↓ 历史)..." autocomplete="off">
+            </div>
+            <div class="send-actions">
+                <button id="send-btn" class="btn" onclick="sendCommand(false)">发送</button>
+                <label class="chk"><input type="checkbox" id="tx-cycle"> 周期</label>
+                <button type="button" class="btn secondary" id="cycle-btn" onclick="toggleCycle()">开始周期</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 多条发送弹窗（类 XCOM） -->
+    <div id="multi-modal" class="modal-mask" onclick="onMultiMaskClick(event)">
+        <div class="modal" role="dialog" aria-modal="true" aria-label="多条发送">
+            <div class="modal-head">
+                <h3>多条发送</h3>
+                <div class="row" style="gap:8px">
+                    <span class="lbl" id="multi-status">0 条已勾选</span>
+                    <button type="button" class="btn ghost" onclick="closeMultiModal()">关闭</button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <div class="multi-toolbar">
+                    <button type="button" class="btn" onclick="sendMultiSelectedOnce()">发送勾选</button>
+                    <button type="button" class="btn secondary" id="multi-cycle-btn" onclick="toggleMultiCycle()">循环发送勾选</button>
+                    <button type="button" class="btn ghost" onclick="multiSelectAll(true)">全选本页</button>
+                    <button type="button" class="btn ghost" onclick="multiSelectAll(false)">全不选本页</button>
+                    <button type="button" class="btn ghost" onclick="multiAddOnePage()">添加一页</button>
+                    <button type="button" class="btn ghost" onclick="multiClearEmpty()">清空空行</button>
+                    <button type="button" class="btn ghost" onclick="multiExport()">导出条目</button>
+                    <button type="button" class="btn ghost" onclick="multiImport()">导入条目</button>
+                </div>
+                <div class="lbl" style="margin:6px 0 8px">勾选要发送的条目，内容会自动保存，下次打开仍在。</div>
+                <div id="multi-list" class="multi-list"></div>
+                <div class="multi-pager">
+                    <span id="multi-page-info">页码 1/1</span>
+                    <button type="button" class="btn ghost" onclick="multiGoPage(-1)">上一页</button>
+                    <button type="button" class="btn ghost" onclick="multiGoPage(1)">下一页</button>
+                    <span>每页</span>
+                    <select id="multi-page-size">
+                        <option value="5">5</option>
+                        <option value="10" selected>10</option>
+                        <option value="15">15</option>
+                        <option value="20">20</option>
+                    </select>
+                    <span>条 · 共 <span id="multi-total">0</span> 条</span>
+                </div>
+            </div>
+            <div class="modal-foot">
+                <span class="lbl">使用上方公共「模式/结尾/校验/周期」；条目勾 HEX 可覆盖模式。</span>
+                <div class="spacer"></div>
+                <button type="button" class="btn ok" onclick="closeMultiModal()">完成</button>
+            </div>
+        </div>
     </div>
 
     <script>
         const logContainer = document.getElementById('log-container');
-        const statusEl = document.getElementById('ws-status');
+        const wsStatusEl = document.getElementById('ws-status');
+        const wsStatusText = document.getElementById('ws-status-text');
         const cmdInput = document.getElementById('cmd-input');
         const serialStatusLabel = document.getElementById('serial-status-label');
         const serialPortSelect = document.getElementById('serial-port-select');
@@ -114,78 +648,704 @@
         const serialBaudSelect = document.getElementById('serial-baud-select');
         const serialEncodingSelect = document.getElementById('serial-encoding-select');
         const serialToggleBtn = document.getElementById('serial-toggle-btn');
-        const refreshPortsBtn = document.getElementById('refresh-ports-btn');
+        const fontSizeRange = document.getElementById('font-size-range');
+        const fontSizeLabel = document.getElementById('font-size-label');
+        const rxDisplayMode = document.getElementById('rx-display-mode');
+        const autoScrollEl = document.getElementById('auto-scroll');
+        const txMode = document.getElementById('tx-mode');
+        const txEol = document.getElementById('tx-eol');
+        const txChecksum = document.getElementById('tx-checksum');
+        const txCycle = document.getElementById('tx-cycle');
+        const periodMs = document.getElementById('period-ms');
+        const cycleBtn = document.getElementById('cycle-btn');
+        const multiCycleBtn = document.getElementById('multi-cycle-btn');
+        const logCountLabel = document.getElementById('log-count-label');
+        const multiListEl = document.getElementById('multi-list');
+        const multiPageSizeEl = document.getElementById('multi-page-size');
 
         const wsPort = {WS_PORT};
         const defaultEncoding = '{DEFAULT_ENCODING}' || 'gbk';
+        const pageHubVersion = '{HUB_VERSION}' || '';
+        const EXPECTED_FEATURES = ['convert', 'write_options', 'ring_buffer', 'auto_reconnect', 'send_queue', 'health_version'];
         const wsUrl = 'ws://' + window.location.hostname + ':' + wsPort;
+        const apiBase = window.location.origin;
+
+        const uiVerLabel = document.getElementById('ui-version-label');
+        if (uiVerLabel && pageHubVersion && pageHubVersion.indexOf('{') < 0) {
+            uiVerLabel.textContent = 'v' + pageHubVersion;
+        }
+
+        function showVersionBanner(html) {
+            const el = document.getElementById('version-banner');
+            if (!el) return;
+            if (!html) {
+                el.classList.remove('show');
+                el.innerHTML = '';
+                return;
+            }
+            el.innerHTML = html;
+            el.classList.add('show');
+        }
+
+        function parseVer(v) {
+            return String(v || '0').split('.').map(p => parseInt(String(p).replace(/\D/g, '') || '0', 10));
+        }
+        function verLt(a, b) {
+            const pa = parseVer(a), pb = parseVer(b);
+            const n = Math.max(pa.length, pb.length);
+            for (let i = 0; i < n; i++) {
+                const x = pa[i] || 0, y = pb[i] || 0;
+                if (x < y) return true;
+                if (x > y) return false;
+            }
+            return false;
+        }
+
+        function applyHealthInfo(health) {
+            if (!health || !health.ok) {
+                showVersionBanner('<strong>Hub 健康检查失败。</strong> 请先运行 scripts\\start-hub.bat 并保持窗口不关。');
+                return;
+            }
+            const ver = health.version || '';
+            const feats = health.features || [];
+            const missing = EXPECTED_FEATURES.filter(f => feats.indexOf(f) < 0);
+            const parts = [];
+            if (!ver) {
+                parts.push('Hub 未报告版本（多半是<strong>旧进程未重启</strong>）。');
+            } else if (pageHubVersion && pageHubVersion.indexOf('{') < 0 && verLt(ver, pageHubVersion)) {
+                parts.push(`Hub 版本 <strong>${ver}</strong> 低于页面期望 <strong>${pageHubVersion}</strong>。`);
+            }
+            if (!feats.length) {
+                parts.push('Hub 未声明 features，convert/自动重连等可能不可用。');
+            } else if (missing.length) {
+                parts.push('缺少能力: <strong>' + missing.join(', ') + '</strong>。');
+            }
+            if (parts.length) {
+                showVersionBanner(
+                    '<div><strong>请重启 Hub</strong> 后再刷新本页（Ctrl+F5）。</div>' +
+                    '<div>' + parts.join(' ') + '</div>' +
+                    '<div>命令: <code>.\\scripts\\start-hub.bat</code> · 当前 Hub: v' + (ver || '?') + '</div>'
+                );
+            } else {
+                showVersionBanner('');
+                if (uiVerLabel) {
+                    uiVerLabel.textContent = 'v' + ver + (health.auto_reconnect ? ' · 自动重连' : '');
+                }
+            }
+        }
+
+        async function checkHubHealthHttp() {
+            try {
+                const resp = await fetch(apiBase + '/api/health', { cache: 'no-store' });
+                const json = await resp.json();
+                applyHealthInfo(json);
+            } catch (e) {
+                showVersionBanner('<strong>无法连接 Hub HTTP。</strong> 请启动 start-hub.bat，并确认地址 ' + apiBase);
+            }
+        }
+
         let ws = null;
         let reconnectDelay = 1000;
         let pingTimer = null;
+        let cycleTimer = null;
+        let cycleRunning = false;
+        let multiCycleTimer = null;
+        let multiCycleRunning = false;
+        let multiCycleIndex = 0;
         let seenSeq = new Set();
         let suppressEncodingEvent = false;
+        let displayCount = 0;
 
         const commandHistory = [];
         let historyIndex = -1;
         let draftInput = '';
-        let serialState = { connected: false, port: null, baudrate: 115200, encoding: defaultEncoding };
+        let serialState = { connected: false, port: null, baudrate: 115200, encoding: defaultEncoding, reconnecting: false };
 
+        // 多条发送：{ enabled, text, hex }[]
+        let multiItems = [];
+        let multiPageIndex = 0;
+        const MULTI_KEY = 'serial_hub_multi_items_v1';
+
+        // 内存中保留结构化日志，便于导出（与显示同步）
+        const logStore = [];
+        const LOG_STORE_MAX = 8000;
+
+        const PREF_KEY = 'serial_hub_ui_prefs_v2';
+        function loadPrefs() {
+            try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}'); }
+            catch { return {}; }
+        }
+        function savePrefs() {
+            localStorage.setItem(PREF_KEY, JSON.stringify({
+                fontSize: parseInt(fontSizeRange.value, 10),
+                rxDisplay: rxDisplayMode.value,
+                autoScroll: autoScrollEl.checked,
+                txMode: txMode.value,
+                txEol: txEol.value,
+                txChecksum: txChecksum.value,
+                periodMs: parseInt(periodMs.value, 10) || 1000,
+            }));
+        }
+        function setFontSize(px) {
+            document.documentElement.style.setProperty('--log-font-size', px + 'px');
+            document.documentElement.style.setProperty('--ui-font-size', Math.max(12, Math.min(px, 15)) + 'px');
+            fontSizeLabel.textContent = px + 'px';
+        }
+        function applyPrefs() {
+            const p = loadPrefs();
+            if (p.fontSize) { fontSizeRange.value = p.fontSize; setFontSize(p.fontSize); }
+            if (p.rxDisplay) rxDisplayMode.value = p.rxDisplay;
+            if (typeof p.autoScroll === 'boolean') autoScrollEl.checked = p.autoScroll;
+            if (p.txMode) txMode.value = p.txMode;
+            if (p.txEol) txEol.value = p.txEol;
+            if (p.txChecksum) txChecksum.value = p.txChecksum;
+            if (p.periodMs) periodMs.value = p.periodMs;
+            updatePlaceholder();
+        }
         if ([...serialEncodingSelect.options].some(o => o.value === defaultEncoding)) {
             serialEncodingSelect.value = defaultEncoding;
         }
+        applyPrefs();
 
-        function connectWs() {
-            if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        fontSizeRange.addEventListener('input', () => {
+            setFontSize(parseInt(fontSizeRange.value, 10));
+            savePrefs();
+        });
+        [rxDisplayMode, autoScrollEl, txMode, txEol, txChecksum, periodMs].forEach(el => {
+            el.addEventListener('change', () => {
+                if (el === txMode) updatePlaceholder();
+                if (el === periodMs && cycleRunning) restartCycle();
+                savePrefs();
+            });
+        });
+
+        function updatePlaceholder() {
+            cmdInput.placeholder = txMode.value === 'hex'
+                ? 'HEX 示例: 01 03 00 00 00 01  或  010300000001（发送后不清除）'
+                : '输入文本指令 (发送后保留，Enter 发送，↑↓ 历史)...';
+        }
+
+        function openMultiModal() {
+            try {
+                if (cycleRunning) stopCycle(true);
+                const modal = document.getElementById('multi-modal');
+                if (!modal) return;
+                modal.classList.add('open');
+                renderMultiList();
+            } catch (e) {
+                console.error(e);
+                alert('打开多条发送失败: ' + (e.message || e));
+            }
+        }
+        function closeMultiModal() {
+            const modal = document.getElementById('multi-modal');
+            if (modal) modal.classList.remove('open');
+            // 关闭弹窗不停循环，方便边看日志边发；若要停可手动点停止
+            saveMultiItems();
+        }
+        function onMultiMaskClick(ev) {
+            if (ev.target && ev.target.id === 'multi-modal') closeMultiModal();
+        }
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeMultiModal();
+        });
+
+        function loadMultiItems() {
+            try {
+                const raw = JSON.parse(localStorage.getItem(MULTI_KEY) || 'null');
+                if (Array.isArray(raw) && raw.length) {
+                    multiItems = raw.map(it => ({
+                        enabled: !!it.enabled,
+                        text: it.text || '',
+                        hex: !!it.hex,
+                    }));
+                }
+            } catch (e) { /* ignore */ }
+            // 默认一页 10 条（序号显示 1–10）
+            if (!multiItems.length) {
+                multiItems = Array.from({ length: 10 }, () => ({ enabled: false, text: '', hex: false }));
+            }
+            multiPageIndex = 0;
+        }
+        function saveMultiItems() {
+            try {
+                localStorage.setItem(MULTI_KEY, JSON.stringify(multiItems));
+            } catch (e) {
+                console.warn('save multi items failed', e);
+            }
+            updateMultiStatus();
+        }
+        function pageSize() {
+            return parseInt(multiPageSizeEl && multiPageSizeEl.value, 10) || 10;
+        }
+        function pageCount() {
+            return Math.max(1, Math.ceil(multiItems.length / pageSize()));
+        }
+        function updateMultiStatus() {
+            const n = multiItems.filter(it => it.enabled && (it.text || '').trim()).length;
+            const el = document.getElementById('multi-status');
+            if (el) el.textContent = n + ' 条已勾选（有内容）';
+            const total = document.getElementById('multi-total');
+            if (total) total.textContent = String(multiItems.length);
+            const info = document.getElementById('multi-page-info');
+            if (info) info.textContent = '页码 ' + (multiPageIndex + 1) + '/' + pageCount();
+        }
+        function renderMultiList() {
+            if (!multiListEl) return;
+            if (multiPageIndex >= pageCount()) multiPageIndex = pageCount() - 1;
+            if (multiPageIndex < 0) multiPageIndex = 0;
+            const ps = pageSize();
+            const start = multiPageIndex * ps;
+            const slice = multiItems.slice(start, start + ps);
+            multiListEl.innerHTML = '';
+            slice.forEach((it, i) => {
+                const idx = start + i;
+                const row = document.createElement('div');
+                row.className = 'multi-row';
+                row.dataset.idx = String(idx);
+
+                const labEn = document.createElement('label');
+                labEn.className = 'chk';
+                labEn.title = '勾选后参与发送';
+                const cbEn = document.createElement('input');
+                cbEn.type = 'checkbox';
+                cbEn.dataset.k = 'enabled';
+                cbEn.checked = !!it.enabled;
+                labEn.appendChild(cbEn);
+
+                const idxEl = document.createElement('span');
+                idxEl.className = 'idx';
+                idxEl.textContent = String(idx + 1); // 显示从 1 开始
+
+                const textIn = document.createElement('input');
+                textIn.type = 'text';
+                textIn.dataset.k = 'text';
+                textIn.value = it.text || '';
+                textIn.placeholder = '条目 ' + (idx + 1) + ' 内容';
+
+                const labHex = document.createElement('label');
+                labHex.className = 'mini-chk';
+                labHex.title = '本条按 HEX 发送（覆盖公共模式）';
+                const cbHex = document.createElement('input');
+                cbHex.type = 'checkbox';
+                cbHex.dataset.k = 'hex';
+                cbHex.checked = !!it.hex;
+                labHex.appendChild(cbHex);
+                labHex.appendChild(document.createTextNode(' HEX'));
+
+                const btnOne = document.createElement('button');
+                btnOne.type = 'button';
+                btnOne.className = 'btn ghost';
+                btnOne.dataset.k = 'sendone';
+                btnOne.style.padding = '4px 8px';
+                btnOne.textContent = '发';
+
+                row.appendChild(labEn);
+                row.appendChild(idxEl);
+                row.appendChild(textIn);
+                row.appendChild(labHex);
+                row.appendChild(btnOne);
+                multiListEl.appendChild(row);
+            });
+            updateMultiStatus();
+        }
+        function currentEncoding() {
+            return (serialEncodingSelect && serialEncodingSelect.value) || defaultEncoding || 'gbk';
+        }
+
+        function parseHexToBytes(hexStr) {
+            const cleaned = String(hexStr || '').replace(/0x/gi, ' ').replace(/,/g, ' ').trim();
+            const parts = cleaned.split(/\s+/).filter(Boolean);
+            let hexOnly;
+            if (parts.length && parts.every(p => /^[0-9a-fA-F]+$/.test(p))) {
+                hexOnly = parts.map(p => (p.length % 2 === 1 ? '0' + p : p)).join('');
+            } else {
+                hexOnly = cleaned.replace(/[^0-9a-fA-F]/g, '');
+            }
+            if (!hexOnly) throw new Error('HEX 内容为空');
+            if (hexOnly.length % 2 !== 0) throw new Error('HEX 长度必须为偶数');
+            const arr = new Uint8Array(hexOnly.length / 2);
+            for (let i = 0; i < hexOnly.length; i += 2) {
+                arr[i / 2] = parseInt(hexOnly.substr(i, 2), 16);
+            }
+            return arr;
+        }
+
+        function bytesToHexSpaced(bytes) {
+            return Array.from(bytes).map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+        }
+
+        /** 浏览器本地转换：解码支持 gbk/utf-8；编码优先 UTF-8（GBK 编码需 Hub） */
+        function localConvert(direction, data, enc) {
+            const toHex = direction === 'to_hex' || direction === 'hex' || direction === 'encode';
+            if (toHex) {
+                // 文本 → HEX：浏览器 TextEncoder 仅 UTF-8
+                const bytes = new TextEncoder().encode(String(data));
+                return {
+                    ok: true,
+                    result: bytesToHexSpaced(bytes),
+                    encoding: 'utf-8',
+                    fallback: true,
+                    note: (enc && enc !== 'utf-8')
+                        ? '本地仅能按 UTF-8 转 HEX；请重启 Hub 以使用 ' + enc
+                        : '',
+                };
+            }
+            // HEX → 文本
+            const bytes = parseHexToBytes(data);
+            const label = (enc || 'utf-8').toLowerCase();
+            const candidates = label === 'utf-8' || label === 'utf8'
+                ? ['utf-8']
+                : [label, 'gbk', 'gb18030', 'utf-8'];
+            let lastErr = null;
+            for (const c of candidates) {
+                try {
+                    const text = new TextDecoder(c, { fatal: false }).decode(bytes);
+                    return { ok: true, result: text, encoding: c, fallback: true };
+                } catch (e) {
+                    lastErr = e;
+                }
+            }
+            throw lastErr || new Error('无法解码 HEX');
+        }
+
+        /** 优先 Hub /api/convert（支持 GBK 编码）；失败则本地兜底，避免 unknown path 直接失败 */
+        async function convertViaHub(direction, data) {
+            const enc = currentEncoding();
+            try {
+                const resp = await fetch(apiBase + '/api/convert', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                    body: JSON.stringify({ direction, data, encoding: enc }),
+                    cache: 'no-store',
+                });
+                const json = await resp.json();
+                if (json && json.ok && typeof json.result === 'string') {
+                    return { ok: true, result: json.result, encoding: json.encoding || enc };
+                }
+                // Hub 返回 unknown path / 其它业务错误 → 本地兜底
+            } catch (e) {
+                // 网络错误 → 本地兜底
+            }
+            try {
+                return localConvert(direction, data, enc);
+            } catch (e2) {
+                return { ok: false, error: (e2 && e2.message) || String(e2) };
+            }
+        }
+
+        async function onMultiHexToggle(idx, wantHex, checkboxEl) {
+            const item = multiItems[idx];
+            if (!item) return;
+            const prev = item.text || '';
+            // 空内容只改标记
+            if (!prev.trim()) {
+                item.hex = wantHex;
+                saveMultiItems();
                 return;
             }
-            statusEl.textContent = 'WebSocket: 连接中...';
-            statusEl.className = 'status disconnected';
-            ws = new WebSocket(wsUrl);
+            // 已经是目标状态则跳过
+            if (!!item.hex === !!wantHex) return;
 
+            if (wantHex) {
+                const r = await convertViaHub('to_hex', prev);
+                if (!r.ok) {
+                    if (checkboxEl) checkboxEl.checked = false;
+                    appendLog('SYSTEM', '转 HEX 失败: ' + r.error);
+                    return;
+                }
+                item.text = r.result;
+                item.hex = true;
+                if (r.fallback) {
+                    appendLog('SYSTEM', r.note
+                        ? ('已本地转 HEX（' + r.note + '）')
+                        : '已本地转 HEX。重启 Hub 后可按连接栏编码精确转换。');
+                }
+            } else {
+                const r = await convertViaHub('to_text', prev);
+                if (!r.ok) {
+                    if (checkboxEl) checkboxEl.checked = true;
+                    appendLog('SYSTEM', 'HEX 转文本失败: ' + r.error + '（已保持 HEX）');
+                    return;
+                }
+                item.text = r.result;
+                item.hex = false;
+                if (r.fallback) {
+                    appendLog('SYSTEM', '已本地 HEX→文本（编码: ' + (r.encoding || 'utf-8') + '）。重启 Hub 后更准确。');
+                }
+            }
+            saveMultiItems();
+            renderMultiList();
+        }
+
+        if (multiListEl) {
+            multiListEl.addEventListener('change', (e) => {
+                const t = e.target;
+                const row = t.closest('.multi-row');
+                if (!row) return;
+                const idx = parseInt(row.dataset.idx, 10);
+                const k = t.dataset.k;
+                if (k === 'enabled') {
+                    multiItems[idx].enabled = t.checked;
+                    saveMultiItems();
+                }
+                if (k === 'hex') {
+                    // 勾选：文本→HEX；取消：HEX→文本
+                    onMultiHexToggle(idx, t.checked, t);
+                }
+            });
+            multiListEl.addEventListener('input', (e) => {
+                const t = e.target;
+                if (t.dataset.k !== 'text') return;
+                const row = t.closest('.multi-row');
+                if (!row) return;
+                const idx = parseInt(row.dataset.idx, 10);
+                multiItems[idx].text = t.value;
+                saveMultiItems();
+            });
+            multiListEl.addEventListener('click', (e) => {
+                const t = e.target.closest('[data-k="sendone"]');
+                if (!t) return;
+                const row = t.closest('.multi-row');
+                const idx = parseInt(row.dataset.idx, 10);
+                sendOnePayload(multiItems[idx].text, multiItems[idx].hex ? 'hex' : null);
+            });
+        }
+        if (multiPageSizeEl) {
+            multiPageSizeEl.addEventListener('change', () => {
+                multiPageIndex = 0;
+                renderMultiList();
+            });
+        }
+
+        function multiGoPage(delta) {
+            multiPageIndex = Math.min(pageCount() - 1, Math.max(0, multiPageIndex + delta));
+            renderMultiList();
+        }
+        function multiSelectAll(on) {
+            const ps = pageSize();
+            const start = multiPageIndex * ps;
+            const end = Math.min(multiItems.length, start + ps);
+            for (let i = start; i < end; i++) multiItems[i].enabled = on;
+            saveMultiItems();
+            renderMultiList();
+        }
+        function multiAddRows(n) {
+            const count = Math.max(1, parseInt(n, 10) || 10);
+            for (let i = 0; i < count; i++) multiItems.push({ enabled: false, text: '', hex: false });
+            saveMultiItems();
+            multiPageIndex = pageCount() - 1;
+            renderMultiList();
+        }
+        /** 按当前「每页」条数添加一整页（默认每页 10 条） */
+        function multiAddOnePage() {
+            multiAddRows(pageSize() || 10);
+        }
+        function multiClearEmpty() {
+            multiItems = multiItems.filter(it => (it.text || '').trim() !== '');
+            // 不足一页时补齐到 10 条，保证默认至少一页
+            while (multiItems.length < 10) {
+                multiItems.push({ enabled: false, text: '', hex: false });
+            }
+            multiPageIndex = 0;
+            saveMultiItems();
+            renderMultiList();
+        }
+        async function multiExport() {
+            const text = JSON.stringify(multiItems, null, 2);
+            const name = 'serial_multi_items.json';
+            try {
+                if (window.showSaveFilePicker) {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: name,
+                        types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
+                    });
+                    const w = await handle.createWritable();
+                    await w.write(text);
+                    await w.close();
+                } else {
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+                    a.download = name;
+                    a.click();
+                }
+                appendLog('SYSTEM', '多条发送条目已导出。');
+            } catch (e) {
+                if (e && e.name === 'AbortError') return;
+                appendLog('SYSTEM', '导出条目失败: ' + (e.message || e));
+            }
+        }
+        function multiImport() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.json,application/json,text/plain';
+            input.onchange = async () => {
+                const file = input.files && input.files[0];
+                if (!file) return;
+                try {
+                    const raw = JSON.parse(await file.text());
+                    if (!Array.isArray(raw)) throw new Error('JSON 需为数组');
+                    multiItems = raw.map(it => ({
+                        enabled: !!it.enabled,
+                        text: String(it.text || it.payload || ''),
+                        hex: !!it.hex,
+                    }));
+                    if (!multiItems.length) throw new Error('空列表');
+                    multiPageIndex = 0;
+                    saveMultiItems();
+                    renderMultiList();
+                    appendLog('SYSTEM', '已导入 ' + multiItems.length + ' 条发送条目。');
+                } catch (e) {
+                    appendLog('SYSTEM', '导入失败: ' + (e.message || e));
+                }
+            };
+            input.click();
+        }
+
+        function getEnabledMultiItems() {
+            return multiItems
+                .map((it, idx) => ({ ...it, idx }))
+                .filter(it => it.enabled && (it.text || '').trim());
+        }
+
+        function highlightMultiRow(idx) {
+            if (!multiListEl) return;
+            multiListEl.querySelectorAll('.multi-row').forEach(r => {
+                r.classList.toggle('sending', parseInt(r.dataset.idx, 10) === idx);
+            });
+        }
+
+        function sendMultiSelectedOnce() {
+            const list = getEnabledMultiItems();
+            if (!list.length) {
+                appendLog('SYSTEM', '请先勾选并填写要发送的条目。');
+                return;
+            }
+            // 顺序发送，小间隔避免粘包观感
+            let i = 0;
+            const step = () => {
+                if (i >= list.length) {
+                    appendLog('SYSTEM', '多条发送完成：' + list.length + ' 条');
+                    highlightMultiRow(-1);
+                    return;
+                }
+                const it = list[i++];
+                highlightMultiRow(it.idx);
+                sendOnePayload(it.text, it.hex ? 'hex' : null);
+                setTimeout(step, 30);
+            };
+            step();
+        }
+
+        function toggleMultiCycle() {
+            if (multiCycleRunning) stopMultiCycle(false);
+            else startMultiCycle();
+        }
+        function startMultiCycle() {
+            if (!serialState.connected) {
+                appendLog('SYSTEM', '请先连接串口。');
+                return;
+            }
+            const list = getEnabledMultiItems();
+            if (!list.length) {
+                appendLog('SYSTEM', '请先勾选并填写要循环发送的条目。');
+                return;
+            }
+            let ms = parseInt(periodMs.value, 10);
+            if (!Number.isFinite(ms) || ms < 10) {
+                appendLog('SYSTEM', '周期至少 10 ms。');
+                return;
+            }
+            if (cycleRunning) stopCycle(true);
+            stopMultiCycle(true);
+            multiCycleRunning = true;
+            multiCycleIndex = 0;
+            if (multiCycleBtn) {
+                multiCycleBtn.textContent = '停止循环';
+                multiCycleBtn.classList.add('cycle-on');
+            }
+            const tick = () => {
+                const cur = getEnabledMultiItems();
+                if (!cur.length) {
+                    appendLog('SYSTEM', '循环发送：无可用条目，已停止。');
+                    stopMultiCycle(false);
+                    return;
+                }
+                if (multiCycleIndex >= cur.length) multiCycleIndex = 0;
+                const it = cur[multiCycleIndex++];
+                highlightMultiRow(it.idx);
+                sendOnePayload(it.text, it.hex ? 'hex' : null);
+            };
+            tick();
+            multiCycleTimer = setInterval(tick, ms);
+            appendLog('SYSTEM', `多条循环发送已启动：每 ${ms} ms，共 ${list.length} 条轮询`);
+        }
+        function stopMultiCycle(silent) {
+            if (multiCycleTimer) { clearInterval(multiCycleTimer); multiCycleTimer = null; }
+            const was = multiCycleRunning;
+            multiCycleRunning = false;
+            if (multiCycleBtn) {
+                multiCycleBtn.textContent = '循环发送勾选';
+                multiCycleBtn.classList.remove('cycle-on');
+            }
+            highlightMultiRow(-1);
+            if (was && !silent) appendLog('SYSTEM', '多条循环发送已停止。');
+        }
+
+        function setWsStatus(ok, text) {
+            wsStatusEl.className = 'ws-pill ' + (ok ? 'ok' : 'bad');
+            wsStatusText.textContent = text;
+        }
+
+        function connectWs() {
+            if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+            setWsStatus(false, 'WebSocket: 连接中...');
+            ws = new WebSocket(wsUrl);
             ws.onopen = () => {
                 reconnectDelay = 1000;
-                statusEl.textContent = 'WebSocket: 已连接（长连）';
-                statusEl.className = 'status connected';
-                appendLog('SYSTEM', '已连接 Serial Hub。网页与 Codex 共用串口与日志。');
+                setWsStatus(true, 'WebSocket: 已连接（长连）');
+                appendLog('SYSTEM', '已连接 Serial Hub。');
                 startPing();
                 refreshPorts();
             };
-
             ws.onmessage = (event) => {
                 let data;
                 try { data = JSON.parse(event.data); } catch { return; }
-                if (data.type === 'status') {
+                if (data.type === 'health') {
+                    applyHealthInfo(data);
+                } else if (data.type === 'status') {
                     serialState = {
-                        connected: data.connected,
+                        connected: !!data.connected,
                         port: data.port,
                         baudrate: data.baudrate,
-                        encoding: data.encoding || defaultEncoding
+                        encoding: data.encoding || defaultEncoding,
+                        reconnecting: !!data.reconnecting
                     };
                     updateSerialUI();
+                    if (!serialState.connected && !serialState.reconnecting) {
+                        if (cycleRunning) stopCycle(true);
+                        if (multiCycleRunning) stopMultiCycle(true);
+                    }
                 } else if (data.type === 'ports') {
                     applyPortList(data.ports || []);
                 } else if (data.type === 'history') {
                     for (const it of (data.items || [])) {
-                        appendLogEntry(it.source, it.msg, it.seq, it.ts, true);
+                        appendLogEntry(it.source, it.msg, it.seq, it.ts, true, it.hex);
                     }
                 } else if (data.type === 'pong') {
-                    // keep-alive ok
                 } else if (data.source) {
-                    appendLogEntry(data.source, data.msg, data.seq, data.ts, false);
+                    appendLogEntry(data.source, data.msg, data.seq, data.ts, false, data.hex);
                 }
             };
-
             ws.onclose = () => {
                 stopPing();
-                statusEl.textContent = 'WebSocket: 已断开，' + (reconnectDelay / 1000) + 's 后重连...';
-                statusEl.className = 'status disconnected';
+                if (cycleRunning) stopCycle(true);
+                if (multiCycleRunning) stopMultiCycle(true);
+                setWsStatus(false, 'WebSocket: 已断开，' + (reconnectDelay / 1000).toFixed(1) + 's 后重连...');
                 setTimeout(connectWs, reconnectDelay);
                 reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
             };
-
-            ws.onerror = () => {
-                try { ws.close(); } catch (e) {}
-            };
+            ws.onerror = () => { try { ws.close(); } catch (e) {} };
         }
 
         function startPing() {
@@ -206,50 +1366,210 @@
             return div.innerHTML;
         }
 
-        function appendLog(source, msg) {
-            appendLogEntry(source, msg, null, null, false);
+        function sourceLabel(source) {
+            switch (source) {
+                case 'LLM': return '[AI Agent 发出]';
+                case 'HARDWARE': return '[下位机 返回]';
+                case 'USER_OVERRIDE': return '[人类/网页 发送]';
+                case 'SYSTEM': return '[系统]';
+                default: return '[' + source + ']';
+            }
         }
 
-        function appendLogEntry(source, msg, seq, ts, isHistory) {
+        function formatTime(ts) {
+            if (ts) return new Date(ts * 1000).toLocaleTimeString('en-US', { hour12: false });
+            return new Date().toLocaleTimeString('en-US', { hour12: false });
+        }
+
+        function formatRxMessage(msg, hexFromServer) {
+            const mode = rxDisplayMode.value;
+            const raw = msg || '';
+            const textHtml = escapeHtml(raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n')).replace(/\n/g, '<br>');
+            const hex = hexFromServer || '';
+            if (mode === 'text') return textHtml;
+            if (mode === 'hex') {
+                return hex ? `<span class="msg-hex">${escapeHtml(hex)}</span>` : textHtml;
+            }
+            if (hex) return `${textHtml}<br><span class="msg-hex">${escapeHtml(hex)}</span>`;
+            return textHtml;
+        }
+
+        function updateLogCount() {
+            logCountLabel.textContent = '日志: ' + displayCount + ' 条';
+        }
+
+        function pushStore(entry) {
+            logStore.push(entry);
+            if (logStore.length > LOG_STORE_MAX) {
+                logStore.splice(0, logStore.length - LOG_STORE_MAX);
+            }
+        }
+
+        function appendLog(source, msg) {
+            appendLogEntry(source, msg, null, Date.now() / 1000, false, null);
+        }
+
+        function appendLogEntry(source, msg, seq, ts, isHistory, hexMsg) {
             if (seq != null) {
                 if (seenSeq.has(seq)) return;
                 seenSeq.add(seq);
-                // 限制 set 大小
-                if (seenSeq.size > 8000) {
-                    seenSeq = new Set([...seenSeq].slice(-4000));
-                }
+                if (seenSeq.size > 8000) seenSeq = new Set([...seenSeq].slice(-4000));
             }
+            const timeStr = formatTime(ts);
+            pushStore({
+                seq: seq,
+                ts: ts || (Date.now() / 1000),
+                time: timeStr,
+                source: source,
+                label: sourceLabel(source),
+                msg: msg || '',
+                hex: hexMsg || ''
+            });
+
             const div = document.createElement('div');
             div.className = 'log-entry';
-            let timeStr;
-            if (ts) {
-                timeStr = new Date(ts * 1000).toLocaleTimeString('en-US', { hour12: false });
+            let htmlMsg;
+            if (source === 'HARDWARE') {
+                htmlMsg = formatRxMessage(msg, hexMsg);
             } else {
-                timeStr = new Date().toLocaleTimeString('en-US', { hour12: false });
+                const normalizedMsg = (msg || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                htmlMsg = escapeHtml(normalizedMsg).replace(/\n/g, '<br>');
             }
-            let sourceLabel = '';
-            switch (source) {
-                case 'LLM': sourceLabel = '[AI Agent 发出]'; break;
-                case 'HARDWARE': sourceLabel = '[下位机 返回]'; break;
-                case 'USER_OVERRIDE': sourceLabel = '[人类/网页 发送]'; break;
-                case 'SYSTEM': sourceLabel = '[系统]'; break;
-                default: sourceLabel = '[' + source + ']';
-            }
-            const normalizedMsg = (msg || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-            const htmlMsg = escapeHtml(normalizedMsg).replace(/\n/g, '<br>');
-            div.innerHTML = `<span class="timestamp">[${timeStr}]</span> <span class="source-${source}">${sourceLabel}</span> <span class="msg-content">${htmlMsg}</span>`;
+            div.innerHTML =
+                `<span class="timestamp">[${timeStr}]</span> ` +
+                `<span class="source-${source}">${sourceLabel(source)}</span> ` +
+                `<span class="msg-content">${htmlMsg}</span>`;
             logContainer.appendChild(div);
-            if (!isHistory || logContainer.children.length < 50) {
-                logContainer.scrollTop = logContainer.scrollHeight;
-            } else {
-                logContainer.scrollTop = logContainer.scrollHeight;
-            }
+            displayCount++;
+            updateLogCount();
+            if (autoScrollEl.checked) logContainer.scrollTop = logContainer.scrollHeight;
         }
 
         function clearLog() {
             logContainer.innerHTML = '';
-            // 保留 seenSeq，避免重连 history 刷屏重复；若希望可重看可清空：
-            // seenSeq.clear();
+            displayCount = 0;
+            logStore.length = 0;
+            updateLogCount();
+        }
+
+        // ---------- 导出 TXT ----------
+        function formatExportText(items) {
+            const lines = [];
+            lines.push('# Serial Hub Log Export');
+            lines.push('# time: ' + new Date().toISOString());
+            lines.push('# port: ' + (serialState.port || '-'));
+            lines.push('# encoding: ' + (serialState.encoding || '-'));
+            lines.push('# count: ' + items.length);
+            lines.push('#');
+            for (const it of items) {
+                const t = it.time || formatTime(it.ts);
+                const label = it.label || sourceLabel(it.source);
+                let body = (it.msg || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                if (it.hex) body += (body ? '\n' : '') + 'HEX: ' + it.hex;
+                // 多行消息缩进续行
+                const bodyLines = body.split('\n');
+                if (bodyLines.length === 1) {
+                    lines.push(`[${t}] ${label} ${bodyLines[0]}`);
+                } else {
+                    lines.push(`[${t}] ${label}`);
+                    for (const bl of bodyLines) lines.push('  ' + bl);
+                }
+            }
+            // Windows 友好 CRLF
+            return lines.join('\r\n') + '\r\n';
+        }
+
+        async function fetchHubLogsForExport() {
+            // 优先从 Hub 拉满缓冲，失败则用页面缓存
+            try {
+                const url = apiBase + '/api/recent?limit=5000';
+                const resp = await fetch(url, { cache: 'no-store' });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const data = await resp.json();
+                if (data && data.ok && Array.isArray(data.items) && data.items.length) {
+                    return data.items.map(it => ({
+                        ts: it.ts,
+                        time: formatTime(it.ts),
+                        source: it.source,
+                        label: sourceLabel(it.source),
+                        msg: it.msg || '',
+                        hex: it.hex || ''
+                    }));
+                }
+            } catch (e) {
+                // fallback
+            }
+            return logStore.slice();
+        }
+
+        function defaultExportName() {
+            const d = new Date();
+            const pad = n => String(n).padStart(2, '0');
+            const stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+                '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+            const port = (serialState.port || 'serial').replace(/[^\w\-]+/g, '_');
+            return `serial_log_${port}_${stamp}.txt`;
+        }
+
+        async function saveTextFile(text, filename) {
+            // Chromium: 系统「另存为」对话框，可选目录
+            if (window.showSaveFilePicker) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: filename,
+                        types: [{
+                            description: 'Text Files',
+                            accept: { 'text/plain': ['.txt'] }
+                        }]
+                    });
+                    const writable = await handle.createWritable();
+                    await writable.write(text);
+                    await writable.close();
+                    return { ok: true, method: 'picker' };
+                } catch (e) {
+                    if (e && e.name === 'AbortError') return { ok: false, aborted: true };
+                    // 继续 fallback
+                }
+            }
+            // 兼容：触发浏览器下载（用户可在下载设置里选目录）
+            const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                URL.revokeObjectURL(a.href);
+                a.remove();
+            }, 1000);
+            return { ok: true, method: 'download' };
+        }
+
+        async function exportLogs() {
+            const btn = document.getElementById('export-btn');
+            btn.disabled = true;
+            try {
+                const items = await fetchHubLogsForExport();
+                if (!items.length) {
+                    appendLog('SYSTEM', '没有可导出的日志。');
+                    return;
+                }
+                const text = formatExportText(items);
+                const name = defaultExportName();
+                const result = await saveTextFile(text, name);
+                if (result.aborted) {
+                    appendLog('SYSTEM', '已取消导出。');
+                } else if (result.ok) {
+                    appendLog('SYSTEM', `已导出 ${items.length} 条日志 → ${name}` +
+                        (result.method === 'picker' ? '（已选择保存位置）' : '（浏览器下载）'));
+                } else {
+                    appendLog('SYSTEM', '导出失败。');
+                }
+            } catch (e) {
+                appendLog('SYSTEM', '导出失败: ' + (e && e.message ? e.message : e));
+            } finally {
+                btn.disabled = false;
+            }
         }
 
         function applyPortList(ports) {
@@ -264,7 +1584,9 @@
                 for (const p of ports) {
                     const opt = document.createElement('option');
                     opt.value = p.device;
-                    opt.textContent = p.device + (p.description ? ' - ' + p.description : '');
+                    const desc = p.description ? (' — ' + p.description) : '';
+                    opt.textContent = p.device + desc;
+                    opt.title = (p.device + desc + (p.hwid ? (' | ' + p.hwid) : ''));
                     serialPortSelect.appendChild(opt);
                 }
                 if (prev && [...serialPortSelect.options].some(o => o.value === prev)) {
@@ -278,7 +1600,7 @@
                 ![...serialPortSelect.options].some(o => o.value === serialState.port)) {
                 const opt = document.createElement('option');
                 opt.value = serialState.port;
-                opt.textContent = serialState.port + ' (已连接)';
+                opt.textContent = serialState.port + ' — 已连接';
                 serialPortSelect.insertBefore(opt, serialPortSelect.firstChild);
                 serialPortSelect.value = serialState.port;
             }
@@ -289,27 +1611,109 @@
                 ws.send(JSON.stringify({ action: 'list_ports' }));
             }
         }
-
         function resolvePort() {
-            const manual = serialPortInput.value.trim();
-            if (manual) return manual;
-            return serialPortSelect.value || '';
+            return serialPortInput.value.trim() || serialPortSelect.value || '';
+        }
+        function buildWriteOptions(modeOverride) {
+            return {
+                mode: modeOverride || txMode.value,
+                eol: txEol.value,
+                checksum: txChecksum.value,
+            };
         }
 
-        function sendCommand() {
-            const cmd = cmdInput.value.trim();
-            if (!cmd) return;
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ action: 'write', payload: cmd }));
-                commandHistory.push(cmd);
-                if (commandHistory.length > 50) commandHistory.shift();
+        /** 底层发送：不清空输入框。modeOverride 可为 'hex'/'text'/null */
+        function sendOnePayload(payload, modeOverride, fromCycle) {
+            const data = payload == null ? '' : String(payload);
+            // 单条周期/多条：允许保留前后空格；手动单次 trim 判断空
+            if (!fromCycle && !data.trim()) return false;
+            if (fromCycle && !data.trim()) {
+                appendLog('SYSTEM', '周期发送：内容为空，已停止。');
+                stopCycle(false);
+                stopMultiCycle(false);
+                return false;
+            }
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                appendLog('SYSTEM', 'WebSocket 未连接，无法发送。');
+                if (fromCycle) { stopCycle(true); stopMultiCycle(true); }
+                return false;
+            }
+            if (!serialState.connected) {
+                appendLog('SYSTEM', '串口未连接。');
+                if (fromCycle) { stopCycle(true); stopMultiCycle(true); }
+                return false;
+            }
+            ws.send(JSON.stringify({
+                action: 'write',
+                payload: data,
+                options: buildWriteOptions(modeOverride),
+            }));
+            return true;
+        }
+
+        function sendCommand(fromCycle) {
+            // 单条发送：始终保留输入框内容（不再 clear）
+            const payload = cmdInput.value;
+            if (!fromCycle && !payload.trim()) return;
+            const ok = sendOnePayload(payload, null, fromCycle);
+            if (ok && !fromCycle) {
+                const hist = payload; // 保留原样进历史
+                if (hist.trim()) {
+                    commandHistory.push(hist);
+                    if (commandHistory.length > 50) commandHistory.shift();
+                }
                 historyIndex = -1;
                 draftInput = '';
-                cmdInput.value = '';
-            } else {
-                appendLog('SYSTEM', 'WebSocket 未连接，无法发送。');
+                // 故意不清除 cmdInput.value
             }
         }
+
+        function toggleCycle() {
+            if (cycleRunning) stopCycle(false);
+            else startCycle();
+        }
+        function startCycle() {
+            if (!serialState.connected) {
+                appendLog('SYSTEM', '请先连接串口再周期发送。');
+                return;
+            }
+            if (!cmdInput.value.trim()) {
+                appendLog('SYSTEM', '请先输入要周期发送的内容。');
+                return;
+            }
+            let ms = parseInt(periodMs.value, 10);
+            if (!Number.isFinite(ms) || ms < 10) {
+                appendLog('SYSTEM', '周期至少 10 ms。');
+                return;
+            }
+            if (multiCycleRunning) stopMultiCycle(true);
+            stopCycle(true);
+            cycleRunning = true;
+            txCycle.checked = true;
+            cycleBtn.textContent = '停止周期';
+            cycleBtn.classList.add('cycle-on');
+            sendCommand(true);
+            cycleTimer = setInterval(() => sendCommand(true), ms);
+            appendLog('SYSTEM', `单条周期发送已启动：每 ${ms} ms（内容保留）`);
+            savePrefs();
+        }
+        function stopCycle(silent) {
+            if (cycleTimer) { clearInterval(cycleTimer); cycleTimer = null; }
+            const was = cycleRunning;
+            cycleRunning = false;
+            txCycle.checked = false;
+            cycleBtn.textContent = '开始周期';
+            cycleBtn.classList.remove('cycle-on');
+            if (was && !silent) appendLog('SYSTEM', '单条周期发送已停止。');
+        }
+        function restartCycle() {
+            if (cycleRunning) startCycle();
+            if (multiCycleRunning) startMultiCycle();
+        }
+        txCycle.addEventListener('change', () => {
+            if (txCycle.checked) startCycle();
+            else stopCycle(false);
+        });
 
         function toggleSerial() {
             if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -317,6 +1721,8 @@
                 return;
             }
             if (serialState.connected) {
+                stopCycle(true);
+                stopMultiCycle(true);
                 ws.send(JSON.stringify({ action: 'close' }));
             } else {
                 const port = resolvePort();
@@ -339,13 +1745,12 @@
             suppressEncodingEvent = true;
             if (serialState.connected) {
                 serialStatusLabel.textContent = `串口: ${serialState.port} (${serialState.encoding || defaultEncoding})`;
-                serialStatusLabel.className = 'status-label status-connected';
+                serialStatusLabel.className = 'status-chip on';
                 serialToggleBtn.textContent = '断开';
-                serialToggleBtn.style.backgroundColor = '#c75450';
+                serialToggleBtn.classList.add('danger');
                 serialPortInput.value = serialState.port || '';
                 serialPortInput.disabled = true;
                 serialPortSelect.disabled = true;
-                refreshPortsBtn.disabled = false;
                 serialBaudSelect.value = String(serialState.baudrate || 115200);
                 serialBaudSelect.disabled = true;
                 if (serialState.encoding) serialEncodingSelect.value = serialState.encoding;
@@ -354,16 +1759,25 @@
                     if (![...serialPortSelect.options].some(o => o.value === serialState.port)) {
                         const opt = document.createElement('option');
                         opt.value = serialState.port;
-                        opt.textContent = serialState.port + ' (已连接)';
+                        opt.textContent = serialState.port + ' — 已连接';
                         serialPortSelect.appendChild(opt);
                     }
                     serialPortSelect.value = serialState.port;
                 }
+            } else if (serialState.reconnecting) {
+                serialStatusLabel.textContent = `串口: 重连中… (${serialState.port || ''})`;
+                serialStatusLabel.className = 'status-chip off';
+                serialToggleBtn.textContent = '取消重连';
+                serialToggleBtn.classList.add('danger');
+                serialPortInput.disabled = true;
+                serialPortSelect.disabled = true;
+                serialBaudSelect.disabled = true;
+                serialEncodingSelect.disabled = true;
             } else {
                 serialStatusLabel.textContent = '串口: 未连接';
-                serialStatusLabel.className = 'status-label status-disconnected';
+                serialStatusLabel.className = 'status-chip off';
                 serialToggleBtn.textContent = '连接';
-                serialToggleBtn.style.backgroundColor = '#0e639c';
+                serialToggleBtn.classList.remove('danger');
                 serialPortInput.disabled = false;
                 serialPortSelect.disabled = false;
                 serialBaudSelect.disabled = false;
@@ -375,7 +1789,6 @@
         serialPortSelect.addEventListener('change', () => {
             if (serialPortSelect.value) serialPortInput.value = serialPortSelect.value;
         });
-
         serialEncodingSelect.addEventListener('change', () => {
             if (suppressEncodingEvent) return;
             if (ws && ws.readyState === WebSocket.OPEN && serialState.connected) {
@@ -387,8 +1800,10 @@
         });
 
         cmdInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') sendCommand();
-            else if (e.key === 'ArrowUp') {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendCommand(false);
+            } else if (e.key === 'ArrowUp') {
                 e.preventDefault();
                 if (!commandHistory.length) return;
                 if (historyIndex === -1) draftInput = cmdInput.value;
@@ -405,12 +1820,16 @@
             }
         });
 
-        // 页面可见时确保连接
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') connectWs();
         });
 
+        loadMultiItems();
+        renderMultiList();
+        checkHubHealthHttp();
         connectWs();
+        // 定期复查版本（防止旧 Hub 未重启）
+        setInterval(checkHubHealthHttp, 30000);
     </script>
 </body>
 </html>

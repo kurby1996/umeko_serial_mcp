@@ -3,7 +3,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT">
-  <img src="https://img.shields.io/badge/Version-0.2.0-orange" alt="Version 0.2.0">
+  <img src="https://img.shields.io/badge/Version-0.3.0-orange" alt="Version 0.3.0">
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platform">
 </p>
 
@@ -128,6 +128,11 @@ read_data 读取日志
 | `SERIAL_MCP_HTTP_PORT` | Hub HTTP 端口 | `8080` |
 | `SERIAL_MCP_HOST` | Hub 监听地址 | `127.0.0.1` |
 | `SERIAL_MCP_ENCODING` | 默认编码 | Windows: `gbk` |
+| `SERIAL_MCP_AUTO_RECONNECT` | 串口异常自动重连 | `1`（开） |
+| `SERIAL_MCP_TX_QUEUE` | 发送队列长度 | `256` |
+| `SERIAL_MCP_BUFFER_MAX` | 日志环形缓冲条数 | `5000` |
+
+**改代码后必须重启 Hub**；网页顶部黄条或 `hub_status` 会提示版本/能力不匹配。
 
 ---
 

@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import traceback
+import queue
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -26,10 +27,19 @@ import serial
 import serial.tools.list_ports
 import websockets
 
+from umeko_serial_mcp.version import HUB_API_PATHS, HUB_FEATURES, HUB_VERSION
+
 SUPPORTED_ENCODINGS = ("utf-8", "gbk", "gb18030")
 DEFAULT_HTTP_PORT = int(os.environ.get("SERIAL_MCP_HTTP_PORT", "8080"))
 DEFAULT_HOST = os.environ.get("SERIAL_MCP_HOST", "127.0.0.1")
 BUFFER_MAX = int(os.environ.get("SERIAL_MCP_BUFFER_MAX", "5000"))
+AUTO_RECONNECT = os.environ.get("SERIAL_MCP_AUTO_RECONNECT", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+TX_QUEUE_SIZE = int(os.environ.get("SERIAL_MCP_TX_QUEUE", "256"))
 
 
 def default_encoding() -> str:
@@ -69,6 +79,8 @@ class SerialHub:
             "port": None,
             "baudrate": 115200,
             "encoding": self.serial_encoding,
+            "reconnecting": False,
+            "version": HUB_VERSION,
         }
         self._seq = 0
         self.buffer: deque[dict[str, Any]] = deque(maxlen=BUFFER_MAX)
@@ -81,6 +93,22 @@ class SerialHub:
         self.http_port = DEFAULT_HTTP_PORT
         self.ws_port = DEFAULT_HTTP_PORT + 1
         self.host = DEFAULT_HOST
+
+        # 上次成功连接参数（自动重连用）
+        self.last_connect: dict[str, Any] = {
+            "port": None,
+            "baudrate": 115200,
+            "encoding": self.serial_encoding,
+        }
+        self.auto_reconnect = AUTO_RECONNECT
+        self._user_closed = True  # 用户主动断开后不自动重连
+        self._reconnect_thread: threading.Thread | None = None
+        self._reconnect_stop = threading.Event()
+
+        # 发送队列：串行化写串口，避免网页周期 + MCP 交错无序
+        self._tx_queue: queue.Queue = queue.Queue(maxsize=max(16, TX_QUEUE_SIZE))
+        self._tx_thread = threading.Thread(target=self._tx_worker, name="serial-tx", daemon=True)
+        self._tx_thread.start()
 
     # ---------- ports ----------
     def enumerate_ports(self) -> list[dict]:
@@ -116,7 +144,7 @@ class SerialHub:
         return text.encode(self.serial_encoding, errors="replace")
 
     # ---------- log buffer ----------
-    def append_log(self, source: str, msg: str) -> dict[str, Any]:
+    def append_log(self, source: str, msg: str, *, hex_msg: str | None = None) -> dict[str, Any]:
         with self.buffer_cv:
             self._seq += 1
             entry = {
@@ -125,6 +153,8 @@ class SerialHub:
                 "source": source,
                 "msg": msg,
             }
+            if hex_msg is not None:
+                entry["hex"] = hex_msg
             self.buffer.append(entry)
             self.buffer_cv.notify_all()
         self.broadcast_log(entry)
@@ -146,14 +176,26 @@ class SerialHub:
         }
 
     def recent(self, limit: int = 200) -> list[dict[str, Any]]:
-        limit = max(1, min(int(limit or 200), 1000))
+        # 导出时可能需要接近整缓冲；上限与 BUFFER_MAX 对齐
+        limit = max(1, min(int(limit or 200), BUFFER_MAX))
         with self.lock:
             items = list(self.buffer)[-limit:]
         return items
 
     # ---------- serial ops ----------
-    def connect(self, port: str, baudrate: int = 115200, encoding: str = "") -> str:
+    def connect(
+        self,
+        port: str,
+        baudrate: int = 115200,
+        encoding: str = "",
+        *,
+        from_reconnect: bool = False,
+    ) -> str:
         with self.lock:
+            if not from_reconnect:
+                # 用户/MCP/网页主动连接：取消后台重连
+                self._reconnect_stop.set()
+            self._user_closed = False
             enc = encoding.strip() if encoding else self.serial_encoding
             self.reset_decoder(enc)
             if self.active_serial and self.active_serial.is_open:
@@ -162,19 +204,28 @@ class SerialHub:
                     self.active_serial.close()
                 except Exception:
                     pass
+                self.active_serial = None
             try:
                 self.active_serial = serial.Serial(port, int(baudrate), timeout=0)
             except Exception as e:
                 self.status["connected"] = False
                 self.status["port"] = None
+                if not from_reconnect:
+                    self.status["reconnecting"] = False
                 msg = f"连接失败: {e}"
                 self._append_unlocked("SYSTEM", msg)
                 self._broadcast_status_unlocked()
                 return msg
+            self.last_connect = {
+                "port": port,
+                "baudrate": int(baudrate),
+                "encoding": self.serial_encoding,
+            }
             self.status["connected"] = True
             self.status["port"] = port
             self.status["baudrate"] = int(baudrate)
             self.status["encoding"] = self.serial_encoding
+            self.status["reconnecting"] = False
             self._start_reader_unlocked()
             msg = f"已连接到 {port} @ {baudrate}，编码 {self.serial_encoding}"
             self._append_unlocked("SYSTEM", msg)
@@ -183,6 +234,9 @@ class SerialHub:
 
     def close(self) -> str:
         with self.lock:
+            self._user_closed = True
+            self._reconnect_stop.set()
+            self.status["reconnecting"] = False
             if self.active_serial and self.active_serial.is_open:
                 port_name = self.status.get("port") or "未知"
                 self._stop_reader_unlocked()
@@ -202,18 +256,188 @@ class SerialHub:
             self._broadcast_status_unlocked()
             return "串口未打开"
 
-    def write(self, data: str, source: str = "LLM") -> str:
+    @staticmethod
+    def parse_hex_string(text: str) -> bytes:
+        """解析 HEX 字符串：支持空格/逗号/0x 前缀，如 '01 0A FF' 或 '010AFF'。"""
+        cleaned = (text or "").replace(",", " ").replace("0x", " ").replace("0X", " ")
+        parts = cleaned.split()
+        if not parts:
+            # 无空格连续十六进制
+            hex_only = "".join(ch for ch in cleaned if ch in "0123456789abcdefABCDEF")
+            if not hex_only:
+                raise ValueError("HEX 内容为空")
+            if len(hex_only) % 2 != 0:
+                raise ValueError("HEX 长度必须为偶数")
+            return bytes.fromhex(hex_only)
+        out = bytearray()
+        for p in parts:
+            p = p.strip()
+            if not p:
+                continue
+            if len(p) % 2 != 0:
+                raise ValueError(f"无效 HEX 段: {p}")
+            out.extend(bytes.fromhex(p))
+        if not out:
+            raise ValueError("HEX 内容为空")
+        return bytes(out)
+
+    @staticmethod
+    def eol_bytes(eol: str) -> bytes:
+        mapping = {
+            "none": b"",
+            "": b"",
+            "cr": b"\r",
+            "lf": b"\n",
+            "crlf": b"\r\n",
+            "\r": b"\r",
+            "\n": b"\n",
+            "\r\n": b"\r\n",
+        }
+        key = (eol or "crlf").strip().lower()
+        if key not in mapping:
+            raise ValueError(f"不支持的结尾: {eol}，可选 none/cr/lf/crlf")
+        return mapping[key]
+
+    @staticmethod
+    def checksum_bytes(data: bytes, algo: str) -> bytes:
+        algo = (algo or "none").strip().lower()
+        if algo in ("none", "", "off"):
+            return b""
+        if algo in ("sum8", "sum", "checksum8"):
+            return bytes([sum(data) & 0xFF])
+        if algo in ("xor", "xor8"):
+            x = 0
+            for b in data:
+                x ^= b
+            return bytes([x & 0xFF])
+        if algo in ("crc16", "crc16_modbus", "modbus"):
+            crc = 0xFFFF
+            for b in data:
+                crc ^= b
+                for _ in range(8):
+                    if crc & 1:
+                        crc = (crc >> 1) ^ 0xA001
+                    else:
+                        crc >>= 1
+            # Modbus：低字节在前
+            return bytes([crc & 0xFF, (crc >> 8) & 0xFF])
+        raise ValueError(f"不支持的校验: {algo}，可选 none/sum8/xor/crc16_modbus")
+
+    @staticmethod
+    def bytes_to_hex_display(data: bytes) -> str:
+        return " ".join(f"{b:02X}" for b in data)
+
+    def write(
+        self,
+        data: str,
+        source: str = "LLM",
+        *,
+        mode: str = "text",
+        eol: str = "crlf",
+        checksum: str = "none",
+    ) -> str:
+        """
+        发送串口数据（经发送队列串行执行）。
+        mode: text | hex
+        eol: none | cr | lf | crlf  （追加在校验之后）
+        checksum: none | sum8 | xor | crc16_modbus  （对正文计算，追加在 EOL 前）
+        """
+        reply: queue.Queue = queue.Queue(maxsize=1)
+        job = {
+            "kind": "write",
+            "data": data,
+            "source": source,
+            "mode": mode,
+            "eol": eol,
+            "checksum": checksum,
+            "reply": reply,
+        }
+        try:
+            self._tx_queue.put(job, timeout=2.0)
+        except queue.Full:
+            return "发送失败: 发送队列已满"
+        try:
+            return reply.get(timeout=10.0)
+        except queue.Empty:
+            return "发送失败: 队列处理超时"
+
+    def _tx_worker(self) -> None:
+        while True:
+            job = self._tx_queue.get()
+            if job is None:
+                break
+            try:
+                if job.get("kind") == "write":
+                    msg = self._write_now(
+                        job.get("data", ""),
+                        source=str(job.get("source") or "LLM"),
+                        mode=str(job.get("mode") or "text"),
+                        eol=str(job.get("eol") if job.get("eol") is not None else "crlf"),
+                        checksum=str(job.get("checksum") or "none"),
+                    )
+                    reply = job.get("reply")
+                    if reply is not None:
+                        try:
+                            reply.put_nowait(msg)
+                        except Exception:
+                            pass
+            except Exception as e:
+                reply = job.get("reply")
+                if reply is not None:
+                    try:
+                        reply.put_nowait(f"发送失败: {e}")
+                    except Exception:
+                        pass
+            finally:
+                self._tx_queue.task_done()
+
+    def _write_now(
+        self,
+        data: str,
+        source: str = "LLM",
+        *,
+        mode: str = "text",
+        eol: str = "crlf",
+        checksum: str = "none",
+    ) -> str:
         with self.lock:
             if not self.active_serial or not self.active_serial.is_open:
                 return "串口未打开"
             try:
-                payload = data if data.endswith("\n") else data + "\r\n"
-                self.active_serial.write(self.encode_text(payload))
-                text = data.strip("\r\n")
+                mode_n = (mode or "text").strip().lower()
+                if mode_n == "hex":
+                    body = self.parse_hex_string(str(data))
+                else:
+                    body = self.encode_text(str(data))
+
+                cs = self.checksum_bytes(body, checksum)
+                ending = self.eol_bytes(eol)
+                frame = body + cs + ending
+                if not frame:
+                    return "发送失败: 空数据"
+                self.active_serial.write(frame)
+
+                if mode_n == "hex":
+                    shown = self.bytes_to_hex_display(frame)
+                    if cs:
+                        shown += f"  [校验 {checksum}]"
+                else:
+                    shown = str(data)
+                    if cs:
+                        shown += f" +{self.bytes_to_hex_display(cs)}"
+                    if ending == b"\r\n":
+                        shown += " <CRLF>"
+                    elif ending == b"\r":
+                        shown += " <CR>"
+                    elif ending == b"\n":
+                        shown += " <LF>"
+
                 src = source if source in ("LLM", "USER_OVERRIDE") else "LLM"
-                self._append_unlocked(src, text)
+                self._append_unlocked(src, shown)
                 return "发送成功"
             except Exception as e:
+                # 写失败可能是端口掉了，触发重连
+                self._handle_serial_error_unlocked(f"写串口异常: {e}")
                 return f"发送失败: {e}"
 
     def set_encoding(self, encoding: str) -> str:
@@ -226,10 +450,41 @@ class SerialHub:
 
     def get_status(self) -> dict[str, Any]:
         with self.lock:
-            return dict(self.status)
+            st = dict(self.status)
+            st["version"] = HUB_VERSION
+            st["auto_reconnect"] = self.auto_reconnect
+            st["tx_queue_size"] = self._tx_queue.qsize()
+            return st
+
+    def health_payload(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "role": "serial-hub",
+            "version": HUB_VERSION,
+            "features": list(HUB_FEATURES),
+            "api": list(HUB_API_PATHS),
+            "http_port": self.http_port,
+            "ws_port": self.ws_port,
+            "host": self.host,
+            "buffer_max": BUFFER_MAX,
+            "auto_reconnect": self.auto_reconnect,
+            "status": self.get_status(),
+        }
+
+    def text_to_hex(self, text: str, encoding: str = "") -> str:
+        enc = normalize_encoding(encoding or self.serial_encoding)
+        data = str(text).encode(enc, errors="replace")
+        return self.bytes_to_hex_display(data)
+
+    def hex_to_text(self, hex_str: str, encoding: str = "") -> str:
+        enc = normalize_encoding(encoding or self.serial_encoding)
+        data = self.parse_hex_string(str(hex_str))
+        return data.decode(enc, errors="replace")
 
     # ---------- internal unlocked helpers (caller holds lock) ----------
-    def _append_unlocked(self, source: str, msg: str) -> dict[str, Any]:
+    def _append_unlocked(
+        self, source: str, msg: str, *, hex_msg: str | None = None
+    ) -> dict[str, Any]:
         self._seq += 1
         entry = {
             "seq": self._seq,
@@ -237,15 +492,18 @@ class SerialHub:
             "source": source,
             "msg": msg,
         }
+        if hex_msg is not None:
+            entry["hex"] = hex_msg
         self.buffer.append(entry)
         self.buffer_cv.notify_all()
-        # broadcast outside strict serial critical section is ok; schedule
-        threading.Thread(target=self.broadcast_log, args=(entry,), daemon=True).start()
+        # 直接调度到 WS 事件循环，不再每条日志新建线程
+        self.broadcast_log(entry)
         return entry
 
     def _broadcast_status_unlocked(self) -> None:
         st = dict(self.status)
-        threading.Thread(target=self.broadcast_status, args=(st,), daemon=True).start()
+        st["version"] = HUB_VERSION
+        self.broadcast_status(st)
 
     def _start_reader_unlocked(self) -> None:
         self._stop_reader_unlocked()
@@ -260,6 +518,63 @@ class SerialHub:
         if t and t.is_alive() and t is not threading.current_thread():
             t.join(timeout=1.0)
 
+    def _handle_serial_error_unlocked(self, reason: str) -> None:
+        """读/写异常时关闭句柄并视配置启动自动重连。"""
+        try:
+            if self.active_serial:
+                try:
+                    self.active_serial.close()
+                except Exception:
+                    pass
+            self.active_serial = None
+        except Exception:
+            pass
+        self.status["connected"] = False
+        self._append_unlocked("SYSTEM", reason)
+        self._broadcast_status_unlocked()
+        if self.auto_reconnect and not self._user_closed and self.last_connect.get("port"):
+            self._start_reconnect_thread()
+
+    def _start_reconnect_thread(self) -> None:
+        if self._reconnect_thread and self._reconnect_thread.is_alive():
+            return
+        self._reconnect_stop.clear()
+        self.status["reconnecting"] = True
+        self._broadcast_status_unlocked()
+        self._reconnect_thread = threading.Thread(
+            target=self._reconnect_loop, name="serial-reconnect", daemon=True
+        )
+        self._reconnect_thread.start()
+
+    def _reconnect_loop(self) -> None:
+        delay = 1.0
+        port = self.last_connect.get("port")
+        baud = int(self.last_connect.get("baudrate") or 115200)
+        enc = self.last_connect.get("encoding") or self.serial_encoding
+        self.append_log("SYSTEM", f"串口异常，将自动重连 {port}（可 close 取消）...")
+        while not self._reconnect_stop.is_set() and not self._user_closed:
+            if not port:
+                break
+            # 已恢复则退出
+            with self.lock:
+                if self.active_serial and self.active_serial.is_open:
+                    self.status["reconnecting"] = False
+                    self._broadcast_status_unlocked()
+                    return
+            msg = self.connect(
+                str(port), baud, str(enc) if enc else "", from_reconnect=True
+            )
+            if msg.startswith("已连接"):
+                self.append_log("SYSTEM", f"自动重连成功: {port}")
+                return
+            self.append_log("SYSTEM", f"重连失败，{delay:.1f}s 后重试: {msg}")
+            if self._reconnect_stop.wait(delay):
+                break
+            delay = min(delay * 1.5, 15.0)
+        with self.lock:
+            self.status["reconnecting"] = False
+            self._broadcast_status_unlocked()
+
     def _read_loop(self) -> None:
         while self.read_running:
             ser = self.active_serial
@@ -268,13 +583,17 @@ class SerialHub:
                     data = ser.read(4096)
                     if data:
                         text = self.decode_bytes(data)
-                        if text:
-                            self.append_log("HARDWARE", text)
+                        hex_msg = self.bytes_to_hex_display(data)
+                        # 文本可能为空（纯二进制），仍记录 HEX
+                        self.append_log("HARDWARE", text if text else hex_msg, hex_msg=hex_msg)
                     else:
                         time.sleep(0.05)
                 except Exception as e:
-                    self.append_log("SYSTEM", f"串口读取异常: {e}")
-                    time.sleep(0.2)
+                    # 端口拔出等
+                    with self.lock:
+                        self.read_running = False
+                        self._handle_serial_error_unlocked(f"串口读取异常: {e}")
+                    break
             else:
                 time.sleep(0.2)
 
@@ -282,10 +601,15 @@ class SerialHub:
     def broadcast_log(self, entry: dict[str, Any]) -> None:
         if not self.ws_loop or not self.ws_clients:
             return
-        payload = json.dumps(
-            {"source": entry["source"], "msg": entry["msg"], "seq": entry["seq"], "ts": entry["ts"]},
-            ensure_ascii=False,
-        )
+        payload_obj = {
+            "source": entry["source"],
+            "msg": entry["msg"],
+            "seq": entry["seq"],
+            "ts": entry["ts"],
+        }
+        if entry.get("hex") is not None:
+            payload_obj["hex"] = entry["hex"]
+        payload = json.dumps(payload_obj, ensure_ascii=False)
 
         def _send() -> None:
             dead = []
@@ -366,20 +690,19 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
             self._serve_dashboard()
             return
         if path == "/api/health":
+            _json_response(self, 200, hub.health_payload())
+            return
+        if path == "/api/status":
             _json_response(
                 self,
                 200,
                 {
                     "ok": True,
-                    "role": "serial-hub",
-                    "http_port": hub.http_port,
-                    "ws_port": hub.ws_port,
-                    "host": hub.host,
+                    "version": HUB_VERSION,
+                    "features": list(HUB_FEATURES),
+                    "status": hub.get_status(),
                 },
             )
-            return
-        if path == "/api/status":
-            _json_response(self, 200, {"ok": True, "status": hub.get_status()})
             return
         if path == "/api/ports":
             _json_response(self, 200, {"ok": True, "ports": hub.enumerate_ports()})
@@ -424,7 +747,16 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 if data is None:
                     data = body.get("payload", "")
                 source = body.get("source") or "LLM"
-                msg = hub.write(str(data), source=str(source))
+                mode = body.get("mode") or "text"
+                eol = body.get("eol") if body.get("eol") is not None else "crlf"
+                checksum = body.get("checksum") or "none"
+                msg = hub.write(
+                    str(data),
+                    source=str(source),
+                    mode=str(mode),
+                    eol=str(eol),
+                    checksum=str(checksum),
+                )
                 ok = msg == "发送成功"
                 _json_response(self, 200, {"ok": ok, "message": msg, "status": hub.get_status()})
                 return
@@ -433,6 +765,35 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 msg = hub.set_encoding(str(encoding))
                 _json_response(self, 200, {"ok": True, "message": msg, "status": hub.get_status()})
                 return
+            if path == "/api/convert":
+                # direction: to_hex | to_text
+                direction = (body.get("direction") or "").strip().lower()
+                encoding = body.get("encoding") or hub.serial_encoding
+                data = body.get("data")
+                if data is None:
+                    data = body.get("text") or body.get("hex") or ""
+                try:
+                    if direction in ("to_hex", "hex", "encode"):
+                        out = hub.text_to_hex(str(data), str(encoding))
+                        _json_response(
+                            self,
+                            200,
+                            {"ok": True, "direction": "to_hex", "result": out, "encoding": normalize_encoding(encoding)},
+                        )
+                        return
+                    if direction in ("to_text", "text", "decode"):
+                        out = hub.hex_to_text(str(data), str(encoding))
+                        _json_response(
+                            self,
+                            200,
+                            {"ok": True, "direction": "to_text", "result": out, "encoding": normalize_encoding(encoding)},
+                        )
+                        return
+                    _json_response(self, 200, {"ok": False, "error": "direction 需为 to_hex 或 to_text"})
+                    return
+                except Exception as conv_err:
+                    _json_response(self, 200, {"ok": False, "error": str(conv_err)})
+                    return
         except Exception as e:
             _json_response(self, 500, {"ok": False, "error": str(e)})
             return
@@ -447,6 +808,7 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
             .replace("{WS_PORT}", str(hub.ws_port))
             .replace("{DEFAULT_ENCODING}", str(default_enc))
             .replace("{HTTP_PORT}", str(hub.http_port))
+            .replace("{HUB_VERSION}", HUB_VERSION)
         )
         body = html.encode("utf-8")
         self.send_response(200)
@@ -460,7 +822,10 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
 async def _ws_handler(websocket) -> None:
     hub.ws_clients.add(websocket)
     try:
-        # 连接后：状态 + 串口列表 + 最近日志（网页刷新不丢近期内容）
+        # 连接后：健康/版本 + 状态 + 串口列表 + 最近日志
+        await websocket.send(
+            json.dumps({"type": "health", **hub.health_payload()}, ensure_ascii=False)
+        )
         await websocket.send(json.dumps({"type": "status", **hub.get_status()}, ensure_ascii=False))
         await websocket.send(json.dumps({"type": "ports", "ports": hub.enumerate_ports()}, ensure_ascii=False))
         recent = hub.recent(200)
@@ -475,7 +840,21 @@ async def _ws_handler(websocket) -> None:
                 continue
             action = data.get("action")
             if action == "write":
-                hub.write(data.get("payload", ""), source="USER_OVERRIDE")
+                payload = data.get("payload", "")
+                opts = data.get("options") or {}
+                # 兼容扁平字段
+                mode = opts.get("mode") or data.get("mode") or "text"
+                eol = opts.get("eol") if opts.get("eol") is not None else data.get("eol", "crlf")
+                checksum = opts.get("checksum") or data.get("checksum") or "none"
+                result = hub.write(
+                    payload,
+                    source="USER_OVERRIDE",
+                    mode=str(mode),
+                    eol=str(eol),
+                    checksum=str(checksum),
+                )
+                if not result.startswith("发送成功"):
+                    hub.append_log("SYSTEM", result)
             elif action == "connect":
                 payload = data.get("payload") or {}
                 port = payload.get("port", "")
@@ -539,10 +918,14 @@ def run_hub(host: str | None = None, http_port: int | None = None) -> None:
     display_host = "127.0.0.1" if hub.host in ("0.0.0.0", "::") else hub.host
     print("=" * 56, flush=True)
     print("  Umeko Serial Hub  (常驻串口中枢)", flush=True)
+    print(f"  版本:  {HUB_VERSION}", flush=True)
+    print(f"  能力:  {', '.join(HUB_FEATURES)}", flush=True)
     print(f"  网页:  http://{display_host}:{hub.http_port}", flush=True)
     print(f"  API:   http://{display_host}:{hub.http_port}/api/health", flush=True)
     print(f"  WS:    ws://{display_host}:{hub.ws_port}", flush=True)
     print(f"  默认编码: {hub.serial_encoding}", flush=True)
+    print(f"  自动重连: {'开' if hub.auto_reconnect else '关'}", flush=True)
+    print("  改代码后必须重启本进程才会生效", flush=True)
     print("  Codex MCP 请指向同一 Hub，不要再单独 open COM", flush=True)
     print("  按 Ctrl+C 退出", flush=True)
     print("=" * 56, flush=True)

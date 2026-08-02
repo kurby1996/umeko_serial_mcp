@@ -15,6 +15,8 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from umeko_serial_mcp.version import HUB_FEATURES, HUB_VERSION, MIN_HUB_VERSION
+
 mcp = FastMCP("SerialPortMCP")
 
 DEFAULT_HUB = os.environ.get("SERIAL_MCP_HUB", "http://127.0.0.1:8080").rstrip("/")
@@ -67,18 +69,58 @@ def _fmt_fail(resp: dict[str, Any]) -> str:
     return resp.get("message") or resp.get("error") or str(resp)
 
 
+def _parse_ver(v: str) -> tuple[int, ...]:
+    parts = []
+    for p in (v or "0").split("."):
+        try:
+            parts.append(int("".join(ch for ch in p if ch.isdigit()) or "0"))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts or (0,))
+
+
+def _check_hub_health(health: dict[str, Any]) -> str:
+    """返回握手提示文本（可能为空）。"""
+    if not health.get("ok"):
+        return ""
+    notes: list[str] = []
+    ver = str(health.get("version") or "")
+    if not ver:
+        notes.append(
+            f"Hub 未报告 version（可能是旧进程）。客户端期望 >= {MIN_HUB_VERSION}。"
+            "请重启 Hub：scripts\\start-hub.bat"
+        )
+    elif _parse_ver(ver) < _parse_ver(MIN_HUB_VERSION):
+        notes.append(
+            f"Hub 版本过旧: {ver} < {MIN_HUB_VERSION}。请重启 Hub 加载新代码。"
+        )
+    feats = health.get("features") or []
+    if feats:
+        missing = [f for f in HUB_FEATURES if f not in feats]
+        if missing:
+            notes.append(f"Hub 缺少能力: {', '.join(missing)}。请重启 Hub。")
+    else:
+        # 旧 health 无 features
+        notes.append("Hub 未声明 features，建议重启 Hub 以启用 convert/自动重连/发送队列。")
+    return "\n".join(notes)
+
+
 @mcp.tool()
 def start_monitor_ui(http_port: int = 8080) -> str:
-    """检查 Hub/监控面板是否已启动。Hub 架构下网页由 start-serial-hub 常驻提供，本工具只做健康检查。"""
+    """检查 Hub/监控面板是否已启动（健康检查 + 版本握手）。"""
     resp = _request("GET", "/api/health")
     if resp.get("ok"):
         base = hub_base()
-        # 若 Hub 端口与参数不一致，仍返回实际 Hub 地址
-        return (
-            f"Hub 已在线。请打开监控页: {base}/\n"
-            f"API: {base}/api/health\n"
-            f"（Hub 架构下无需在 MCP 内再起网页；请保持 start-serial-hub 运行）"
-        )
+        warn = _check_hub_health(resp)
+        lines = [
+            f"Hub 已在线 v{resp.get('version') or '?'}。请打开: {base}/",
+            f"API: {base}/api/health",
+            f"MCP 客户端版本期望: {HUB_VERSION} / min Hub {MIN_HUB_VERSION}",
+            "请保持 start-serial-hub 运行；改代码后必须重启 Hub。",
+        ]
+        if warn:
+            lines.append("⚠️ " + warn.replace("\n", "\n⚠️ "))
+        return "\n".join(lines)
     return _fmt_fail(resp)
 
 
@@ -160,24 +202,43 @@ def read_data(limit: int = 200) -> str:
 
 @mcp.tool()
 def hub_status() -> str:
-    """查询 Serial Hub 与串口状态。"""
-    resp = _request("GET", "/api/status")
-    if not resp.get("ok"):
-        return _fmt_fail(resp)
-    st = resp.get("status") or {}
-    return (
-        f"Hub: {hub_base()}\n"
-        f"connected={st.get('connected')} port={st.get('port')} "
-        f"baud={st.get('baudrate')} encoding={st.get('encoding')}"
-    )
+    """查询 Serial Hub 版本、能力与串口状态。"""
+    health = _request("GET", "/api/health")
+    if not health.get("ok"):
+        return _fmt_fail(health)
+    st = health.get("status") or {}
+    # 兼容仅 status 接口
+    if not st:
+        resp = _request("GET", "/api/status")
+        st = (resp.get("status") or {}) if resp.get("ok") else {}
+    warn = _check_hub_health(health)
+    lines = [
+        f"Hub: {hub_base()}",
+        f"version={health.get('version') or st.get('version') or '?'}",
+        f"features={','.join(health.get('features') or []) or '-'}",
+        f"connected={st.get('connected')} reconnecting={st.get('reconnecting')} "
+        f"port={st.get('port')} baud={st.get('baudrate')} encoding={st.get('encoding')}",
+        f"auto_reconnect={health.get('auto_reconnect', st.get('auto_reconnect'))} "
+        f"tx_queue={st.get('tx_queue_size', '?')}",
+        f"client_expect={HUB_VERSION} min_hub={MIN_HUB_VERSION}",
+    ]
+    if warn:
+        lines.append("WARN: " + warn.replace("\n", " | "))
+    return "\n".join(lines)
 
 
 def run_mcp() -> None:
-    print(f"[mcp] Serial Hub = {hub_base()}", file=sys.stderr, flush=True)
-    # 启动时探测一次，方便 Codex 日志里看到
+    print(f"[mcp] Serial MCP client {HUB_VERSION}, Hub = {hub_base()}", file=sys.stderr, flush=True)
     health = _request("GET", "/api/health")
     if health.get("ok"):
-        print(f"[mcp] Hub online: {hub_base()}", file=sys.stderr, flush=True)
+        print(
+            f"[mcp] Hub online v{health.get('version') or '?'}: {hub_base()}",
+            file=sys.stderr,
+            flush=True,
+        )
+        warn = _check_hub_health(health)
+        if warn:
+            print(f"[mcp] WARN: {warn}", file=sys.stderr, flush=True)
     else:
         print(
             f"[mcp] Hub offline: {_fmt_fail(health)}",
