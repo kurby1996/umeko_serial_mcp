@@ -1,7 +1,7 @@
 """
 入口：
-  --hub / --dashboard  启动常驻 Serial Hub（网页 + API + 串口）
-  默认                 启动 MCP 瘦客户端（给 Codex 用，转发到 Hub）
+  --hub   启动常驻 Serial Hub（网页 + API + 串口）
+  默认    启动 MCP 瘦客户端（给 Codex 用，转发到 Hub）
 """
 
 from __future__ import annotations
@@ -13,11 +13,10 @@ import sys
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Umeko Serial MCP / Hub",
+        description="Umeko Serial Hub / MCP thin client",
     )
     parser.add_argument(
         "--hub",
-        "--dashboard",
         action="store_true",
         dest="hub",
         help="启动常驻 Serial Hub（网页监控 + HTTP API，独占串口）",

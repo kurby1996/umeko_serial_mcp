@@ -1,2 +1,0 @@
-[hub-http] "GET /api/health HTTP/1.1" 200 -
-[hub-http] "GET /api/ports HTTP/1.1" 200 -
