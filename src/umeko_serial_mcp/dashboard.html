@@ -535,6 +535,8 @@
                 </select>
             </div>
             <label class="chk"><input type="checkbox" id="auto-scroll" checked> 自动滚动</label>
+            <label class="chk"><input type="checkbox" id="show-timestamp" checked> 时间戳</label>
+            <label class="chk"><input type="checkbox" id="show-source" checked> 源头标签</label>
             <div class="spacer"></div>
             <span class="lbl" id="log-count-label">日志: 0 条</span>
         </div>
@@ -652,6 +654,8 @@
         const fontSizeLabel = document.getElementById('font-size-label');
         const rxDisplayMode = document.getElementById('rx-display-mode');
         const autoScrollEl = document.getElementById('auto-scroll');
+        const showTimestampEl = document.getElementById('show-timestamp');
+        const showSourceEl = document.getElementById('show-source');
         const txMode = document.getElementById('tx-mode');
         const txEol = document.getElementById('tx-eol');
         const txChecksum = document.getElementById('tx-checksum');
@@ -755,6 +759,7 @@
         let seenSeq = new Set();
         let suppressEncodingEvent = false;
         let displayCount = 0;
+        let lastLogSource = null;
 
         const commandHistory = [];
         let historyIndex = -1;
@@ -780,6 +785,8 @@
                 fontSize: parseInt(fontSizeRange.value, 10),
                 rxDisplay: rxDisplayMode.value,
                 autoScroll: autoScrollEl.checked,
+                showTimestamp: showTimestampEl.checked,
+                showSource: showSourceEl.checked,
                 txMode: txMode.value,
                 txEol: txEol.value,
                 txChecksum: txChecksum.value,
@@ -796,6 +803,8 @@
             if (p.fontSize) { fontSizeRange.value = p.fontSize; setFontSize(p.fontSize); }
             if (p.rxDisplay) rxDisplayMode.value = p.rxDisplay;
             if (typeof p.autoScroll === 'boolean') autoScrollEl.checked = p.autoScroll;
+            if (typeof p.showTimestamp === 'boolean') showTimestampEl.checked = p.showTimestamp;
+            if (typeof p.showSource === 'boolean') showSourceEl.checked = p.showSource;
             if (p.txMode) txMode.value = p.txMode;
             if (p.txEol) txEol.value = p.txEol;
             if (p.txChecksum) txChecksum.value = p.txChecksum;
@@ -811,10 +820,11 @@
             setFontSize(parseInt(fontSizeRange.value, 10));
             savePrefs();
         });
-        [rxDisplayMode, autoScrollEl, txMode, txEol, txChecksum, periodMs].forEach(el => {
+        [rxDisplayMode, autoScrollEl, showTimestampEl, showSourceEl, txMode, txEol, txChecksum, periodMs].forEach(el => {
             el.addEventListener('change', () => {
                 if (el === txMode) updatePlaceholder();
                 if (el === periodMs && cycleRunning) restartCycle();
+                if (el === rxDisplayMode || el === showTimestampEl || el === showSourceEl) rebuildLogView();
                 savePrefs();
             });
         });
@@ -1409,22 +1419,24 @@
             appendLogEntry(source, msg, null, Date.now() / 1000, false, null);
         }
 
-        function appendLogEntry(source, msg, seq, ts, isHistory, hexMsg) {
-            if (seq != null) {
-                if (seenSeq.has(seq)) return;
-                seenSeq.add(seq);
-                if (seenSeq.size > 8000) seenSeq = new Set([...seenSeq].slice(-4000));
-            }
+        function appendLogEntry(source, msg, seq, ts, isHistory, hexMsg, skipStore) {
             const timeStr = formatTime(ts);
-            pushStore({
-                seq: seq,
-                ts: ts || (Date.now() / 1000),
-                time: timeStr,
-                source: source,
-                label: sourceLabel(source),
-                msg: msg || '',
-                hex: hexMsg || ''
-            });
+            if (!skipStore) {
+                if (seq != null) {
+                    if (seenSeq.has(seq)) return;
+                    seenSeq.add(seq);
+                    if (seenSeq.size > 8000) seenSeq = new Set([...seenSeq].slice(-4000));
+                }
+                pushStore({
+                    seq: seq,
+                    ts: ts || (Date.now() / 1000),
+                    time: timeStr,
+                    source: source,
+                    label: sourceLabel(source),
+                    msg: msg || '',
+                    hex: hexMsg || ''
+                });
+            }
 
             const div = document.createElement('div');
             div.className = 'log-entry';
@@ -1435,19 +1447,48 @@
                 const normalizedMsg = (msg || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
                 htmlMsg = escapeHtml(normalizedMsg).replace(/\n/g, '<br>');
             }
-            div.innerHTML =
-                `<span class="timestamp">[${timeStr}]</span> ` +
-                `<span class="source-${source}">${sourceLabel(source)}</span> ` +
-                `<span class="msg-content">${htmlMsg}</span>`;
+            const sameAsLast = lastLogSource === source;
+            const showTimestamp = showTimestampEl.checked;
+            const showSource = showSourceEl.checked;
+            const sourcePart = (showSource && !sameAsLast)
+                ? `<span class="source-${source}">${sourceLabel(source)}</span> `
+                : '';
+            const timestampPart = showTimestamp
+                ? `<span class="timestamp">[${timeStr}]</span> `
+                : '';
+            div.innerHTML = timestampPart + sourcePart + `<span class="msg-content">${htmlMsg}</span>`;
             logContainer.appendChild(div);
+            if (showSource) lastLogSource = source;
             displayCount++;
             updateLogCount();
             if (autoScrollEl.checked) logContainer.scrollTop = logContainer.scrollHeight;
         }
 
+        function isLogScrolledToBottom() {
+            return logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight < 10;
+        }
+
+        function rebuildLogView() {
+            const wasAtBottom = isLogScrolledToBottom();
+            const oldScrollTop = logContainer.scrollTop;
+            logContainer.innerHTML = '';
+            displayCount = 0;
+            lastLogSource = null;
+            for (const it of logStore) {
+                appendLogEntry(it.source, it.msg, it.seq, it.ts, true, it.hex, true);
+            }
+            updateLogCount();
+            if (wasAtBottom && autoScrollEl.checked) {
+                logContainer.scrollTop = logContainer.scrollHeight;
+            } else {
+                logContainer.scrollTop = oldScrollTop;
+            }
+        }
+
         function clearLog() {
             logContainer.innerHTML = '';
             displayCount = 0;
+            lastLogSource = null;
             logStore.length = 0;
             updateLogCount();
         }
