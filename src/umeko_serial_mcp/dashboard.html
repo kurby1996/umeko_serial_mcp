@@ -757,7 +757,7 @@
         const wsPort = {WS_PORT};
         const defaultEncoding = '{DEFAULT_ENCODING}' || 'gbk';
         const pageHubVersion = '{HUB_VERSION}' || '';
-        const EXPECTED_FEATURES = ['convert', 'write_options', 'ring_buffer', 'auto_reconnect', 'send_queue', 'health_version'];
+        const EXPECTED_FEATURES = ['convert', 'write_options', 'ring_buffer', 'clear_shared_logs', 'auto_reconnect', 'send_queue', 'health_version'];
         const wsUrl = 'ws://' + window.location.hostname + ':' + wsPort;
         const apiBase = window.location.origin;
 
@@ -1454,6 +1454,8 @@
                     for (const it of (data.items || [])) {
                         appendLogEntry(it.source, it.msg, it.seq, it.ts, true, it.hex);
                     }
+                } else if (data.type === 'logs_cleared') {
+                    clearLogView();
                 } else if (data.type === 'pong') {
                 } else if (data.source) {
                     appendLogEntry(data.source, data.msg, data.seq, data.ts, false, data.hex);
@@ -1612,7 +1614,22 @@
             }
         }
 
-        function clearLog() {
+        async function clearLog() {
+            try {
+                const resp = await fetch(apiBase + '/api/clear-logs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const data = await resp.json();
+                if (!resp.ok || !data.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+                clearLogView();
+            } catch (e) {
+                appendLog('SYSTEM', 'Shared log clear failed: ' + (e.message || e));
+            }
+        }
+
+        function clearLogView() {
             logContainer.innerHTML = '';
             displayCount = 0;
             lastLogSource = null;

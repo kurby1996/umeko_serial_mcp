@@ -178,6 +178,15 @@ def read_data(limit: int = 200) -> str:
     resp = _request("GET", "/api/read", query={"cursor": str(_read_cursor), "limit": str(limit)})
     if not resp.get("ok"):
         return _fmt_fail(resp)
+    # A Hub restart resets its sequence counter, while this MCP process may
+    # still retain a cursor from the old Hub instance. Re-read from zero so
+    # post-restart logs are not permanently filtered out.
+    latest_seq = int(resp.get("latest_seq") or 0)
+    if latest_seq < _read_cursor:
+        _read_cursor = 0
+        resp = _request("GET", "/api/read", query={"cursor": "0", "limit": str(limit)})
+        if not resp.get("ok"):
+            return _fmt_fail(resp)
     items = resp.get("items") or []
     _read_cursor = int(resp.get("next_cursor") or _read_cursor)
     if not items:

@@ -182,6 +182,17 @@ class SerialHub:
             items = list(self.buffer)[-limit:]
         return items
 
+    def clear_logs(self) -> int:
+        """Clear the shared log ring without resetting the monotonic sequence."""
+        with self.buffer_cv:
+            cleared = len(self.buffer)
+            self.buffer.clear()
+            # Keep _seq monotonic so existing MCP cursors can safely read logs
+            # appended after a clear without replaying pre-clear entries.
+            self.buffer_cv.notify_all()
+        self.broadcast_event({"type": "logs_cleared", "cleared": cleared})
+        return cleared
+
     # ---------- serial ops ----------
     def connect(
         self,
@@ -640,6 +651,19 @@ class SerialHub:
         except Exception:
             pass
 
+    def broadcast_event(self, event: dict[str, Any]) -> None:
+        if not self.ws_loop or not self.ws_clients:
+            return
+        payload = json.dumps(event, ensure_ascii=False)
+
+        def _send() -> None:
+            websockets.broadcast(self.ws_clients, payload)
+
+        try:
+            self.ws_loop.call_soon_threadsafe(_send)
+        except Exception:
+            pass
+
 
 # 全局单例（Hub 进程内）
 hub = SerialHub()
@@ -737,6 +761,10 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 ok = msg.startswith("已连接")
                 # 业务失败也返回 HTTP 200，由 ok 字段区分（便于脚本与 MCP 客户端）
                 _json_response(self, 200, {"ok": ok, "message": msg, "status": hub.get_status()})
+                return
+            if path == "/api/clear-logs":
+                cleared = hub.clear_logs()
+                _json_response(self, 200, {"ok": True, "cleared": cleared, "status": hub.get_status()})
                 return
             if path == "/api/close":
                 msg = hub.close()
