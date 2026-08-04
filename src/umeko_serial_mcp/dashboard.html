@@ -68,7 +68,7 @@
             display: flex;
             flex-direction: column;
             gap: 10px;
-            transition: transform .22s ease, box-shadow .22s ease;
+            transition: transform .22s ease, box-shadow .22s ease, background-color .15s ease, opacity .15s ease;
         }
         body.toolbar-autohide {
             padding-top: 6px;
@@ -76,24 +76,43 @@
         body.toolbar-autohide .toolbar-dock {
             position: fixed;
             top: 0;
-            left: 16px;
-            right: 16px;
+            left: 0;
+            right: 0;
             z-index: 1000;
+            padding: 10px 16px 12px;
             transform: translateY(calc(-100% + 6px));
             filter: drop-shadow(0 6px 16px rgba(0,0,0,.45));
+            opacity: 1;
+            background: transparent;
         }
         body.toolbar-autohide .toolbar-dock:hover,
         body.toolbar-autohide .toolbar-dock:focus-within {
             transform: translateY(0);
+            /* 悬停展开时使用不透明实底，避免日志从面板间隙透出 */
+            opacity: 1;
+            background: var(--bg);
+            box-shadow: 0 10px 28px rgba(0,0,0,.5);
         }
         body.toolbar-autohide .toolbar-dock::after {
             content: '';
             position: absolute;
             left: 0;
             right: 0;
-            bottom: -6px;
-            height: 6px;
+            bottom: -10px;
+            height: 10px;
             background: transparent;
+        }
+        /* 自动隐藏时右上角快捷清屏（对应 theater 的悬浮按钮） */
+        .autohide-actions {
+            display: none;
+            position: fixed;
+            top: 12px;
+            right: 12px;
+            z-index: 1001;
+            gap: 8px;
+        }
+        body.toolbar-autohide:not(.log-theater) .autohide-actions {
+            display: inline-flex;
         }
         .theater-actions {
             display: none;
@@ -104,7 +123,8 @@
             gap: 8px;
         }
         body.log-theater .theater-actions { display: inline-flex; }
-        .theater-actions button {
+        .theater-actions button,
+        .autohide-actions button {
             padding: 8px 14px;
             border-radius: 8px;
             background: rgba(30, 41, 59, .92);
@@ -115,7 +135,8 @@
             box-shadow: var(--shadow);
             backdrop-filter: blur(4px);
         }
-        .theater-actions button:hover { background: rgba(51, 65, 85, .95); }
+        .theater-actions button:hover,
+        .autohide-actions button:hover { background: rgba(51, 65, 85, .95); }
         .theater-exit { display: none; }
         body.log-theater .theater-exit { display: inline-flex; }
         .topbar {
@@ -589,7 +610,7 @@
 
                 <button id="serial-toggle-btn" class="btn" onclick="toggleSerial()">连接</button>
                 <div class="spacer"></div>
-                <button type="button" class="btn ok" id="export-btn" onclick="exportLogs()" title="导出缓冲日志为 TXT，可选择保存位置">导出 TXT</button>
+                <button type="button" class="btn ok" id="export-btn" onclick="exportLogs()" title="导出当前屏幕日志为 TXT（与显示一致，清屏后为空）">导出 TXT</button>
             </div>
         </div>
 
@@ -623,6 +644,9 @@
     </div>
 
     <div id="log-container"></div>
+    <div class="autohide-actions">
+        <button type="button" onclick="clearLog()" title="清空日志">清屏</button>
+    </div>
     <div class="theater-actions">
         <button type="button" class="btn ghost" onclick="clearLog()">清屏</button>
         <button type="button" class="theater-exit" id="theater-exit-btn" onclick="toggleLogTheater()">退出只看日志</button>
@@ -1637,54 +1661,49 @@
             updateLogCount();
         }
 
-        // ---------- 导出 TXT ----------
-        function formatExportText(items) {
-            const lines = [];
-            lines.push('# Serial Hub Log Export');
-            lines.push('# time: ' + new Date().toISOString());
-            lines.push('# port: ' + (serialState.port || '-'));
-            lines.push('# encoding: ' + (serialState.encoding || '-'));
-            lines.push('# count: ' + items.length);
-            lines.push('#');
-            for (const it of items) {
-                const t = it.time || formatTime(it.ts);
-                const label = it.label || sourceLabel(it.source);
-                let body = (it.msg || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-                if (it.hex) body += (body ? '\n' : '') + 'HEX: ' + it.hex;
-                // 多行消息缩进续行
-                const bodyLines = body.split('\n');
-                if (bodyLines.length === 1) {
-                    lines.push(`[${t}] ${label} ${bodyLines[0]}`);
-                } else {
-                    lines.push(`[${t}] ${label}`);
-                    for (const bl of bodyLines) lines.push('  ' + bl);
-                }
-            }
-            // Windows 友好 CRLF
-            return lines.join('\r\n') + '\r\n';
+        // ---------- 导出 TXT（与当前屏幕显示一致） ----------
+        function formatRxMessagePlain(msg, hexFromServer) {
+            // 与 formatRxMessage 同一套接收显示模式，输出纯文本
+            const mode = rxDisplayMode.value;
+            const raw = (msg || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+            const hex = hexFromServer || '';
+            if (mode === 'text') return raw;
+            if (mode === 'hex') return hex || raw;
+            // both
+            if (hex) return raw + (raw ? '\n' : '') + hex;
+            return raw;
         }
 
-        async function fetchHubLogsForExport() {
-            // 优先从 Hub 拉满缓冲，失败则用页面缓存
-            try {
-                const url = apiBase + '/api/recent?limit=5000';
-                const resp = await fetch(url, { cache: 'no-store' });
-                if (!resp.ok) throw new Error('HTTP ' + resp.status);
-                const data = await resp.json();
-                if (data && data.ok && Array.isArray(data.items) && data.items.length) {
-                    return data.items.map(it => ({
-                        ts: it.ts,
-                        time: formatTime(it.ts),
-                        source: it.source,
-                        label: sourceLabel(it.source),
-                        msg: it.msg || '',
-                        hex: it.hex || ''
-                    }));
+        function formatExportText(items) {
+            const lines = [];
+            const showTimestamp = showTimestampEl.checked;
+            const showSource = showSourceEl.checked;
+            let lastSource = null;
+            for (const it of items) {
+                const t = it.time || formatTime(it.ts);
+                const src = it.source;
+                const label = it.label || sourceLabel(src);
+                let body = (src === 'HARDWARE')
+                    ? formatRxMessagePlain(it.msg, it.hex)
+                    : (it.msg || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                const bodyLines = body.split('\n');
+                const sameAsLast = showSource && lastSource === src;
+                const prefixParts = [];
+                if (showTimestamp) prefixParts.push('[' + t + ']');
+                if (showSource && !sameAsLast) prefixParts.push(label);
+                const prefix = prefixParts.join(' ');
+                if (bodyLines.length === 1) {
+                    lines.push(prefix ? (prefix + ' ' + bodyLines[0]) : bodyLines[0]);
+                } else {
+                    if (prefix) lines.push(prefix);
+                    for (const bl of bodyLines) {
+                        lines.push(prefix ? ('  ' + bl) : bl);
+                    }
                 }
-            } catch (e) {
-                // fallback
+                if (showSource) lastSource = src;
             }
-            return logStore.slice();
+            // Windows 友好 CRLF；无内容时导出真正空文件
+            return lines.length ? (lines.join('\r\n') + '\r\n') : '';
         }
 
         function defaultExportName() {
@@ -1734,19 +1753,21 @@
             const btn = document.getElementById('export-btn');
             btn.disabled = true;
             try {
-                const items = await fetchHubLogsForExport();
-                if (!items.length) {
-                    appendLog('SYSTEM', '没有可导出的日志。');
-                    return;
-                }
+                // 只导出当前屏幕 logStore（清屏后即为空），不回读 Hub 全量缓冲
+                const items = logStore.slice();
                 const text = formatExportText(items);
                 const name = defaultExportName();
                 const result = await saveTextFile(text, name);
                 if (result.aborted) {
                     appendLog('SYSTEM', '已取消导出。');
                 } else if (result.ok) {
-                    appendLog('SYSTEM', `已导出 ${items.length} 条日志 → ${name}` +
-                        (result.method === 'picker' ? '（已选择保存位置）' : '（浏览器下载）'));
+                    if (!items.length) {
+                        appendLog('SYSTEM', `屏幕日志为空，已导出空文件 → ${name}` +
+                            (result.method === 'picker' ? '（已选择保存位置）' : '（浏览器下载）'));
+                    } else {
+                        appendLog('SYSTEM', `已导出当前屏幕 ${items.length} 条日志 → ${name}` +
+                            (result.method === 'picker' ? '（已选择保存位置）' : '（浏览器下载）'));
+                    }
                 } else {
                     appendLog('SYSTEM', '导出失败。');
                 }
