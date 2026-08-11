@@ -58,11 +58,9 @@
         body.log-theater #multi-modal {
             display: none !important;
         }
-        body.log-theater #log-container {
+        body.log-theater #log-wrap {
             flex: 1;
             min-height: 100vh;
-            border-radius: 0;
-            border: none;
         }
         .toolbar-dock {
             display: flex;
@@ -325,22 +323,81 @@
             accent-color: var(--accent);
         }
 
+        #log-wrap {
+            position: relative;
+            flex: 1 1 0;
+            min-height: 280px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
         #log-container {
-            flex: 1;
-            min-height: 420px;
+            flex: 1 1 auto;
+            min-height: 0;
             background: #07090d;
             border: 1px solid var(--border-soft);
             border-radius: var(--radius);
             padding: 10px 12px;
             overflow-y: auto;
+            overflow-x: hidden;
             font-family: Consolas, "Cascadia Mono", "Microsoft YaHei Mono", monospace;
             font-size: var(--log-font-size);
             line-height: 1.45;
             box-shadow: inset 0 0 0 1px rgba(255,255,255,.02);
+            scrollbar-width: thin;
+            scrollbar-color: #4b5568 #12151c;
         }
-        #log-container::-webkit-scrollbar { width: 10px; }
+        body.log-theater #log-container {
+            border-radius: 0;
+            border: none;
+        }
+        #log-container::-webkit-scrollbar { width: 12px; }
+        #log-container::-webkit-scrollbar-track {
+            background: #12151c;
+            border-radius: 8px;
+        }
         #log-container::-webkit-scrollbar-thumb {
-            background: #2f3642; border-radius: 8px;
+            background: #4b5568;
+            border-radius: 8px;
+            border: 2px solid #12151c;
+        }
+        #log-container::-webkit-scrollbar-thumb:hover {
+            background: #6b7280;
+        }
+        /* 冻结跟随：有新日志时提示跳到底部（MobaXterm 风格） */
+        #log-follow-hint {
+            display: none;
+            position: absolute;
+            right: 22px;
+            bottom: 16px;
+            z-index: 20;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            border-radius: 999px;
+            border: 1px solid rgba(59,130,246,.45);
+            background: rgba(30, 41, 59, .94);
+            color: #e2e8f0;
+            font-size: 12px;
+            font-family: inherit;
+            cursor: pointer;
+            box-shadow: 0 8px 24px rgba(0,0,0,.45);
+            backdrop-filter: blur(6px);
+            user-select: none;
+        }
+        #log-follow-hint.show { display: inline-flex; }
+        #log-follow-hint:hover {
+            background: rgba(51, 65, 85, .98);
+            border-color: rgba(96,165,250,.7);
+        }
+        #log-follow-hint kbd {
+            font-size: 11px;
+            padding: 1px 6px;
+            border-radius: 4px;
+            border: 1px solid #4b5568;
+            background: #0f172a;
+            color: #93c5fd;
+            font-family: inherit;
         }
         .log-entry { margin-bottom: 3px; word-break: break-word; }
         .timestamp { color: #6b7280; }
@@ -631,7 +688,7 @@
                         <option value="both">文本 + HEX</option>
                     </select>
                 </div>
-                <label class="chk"><input type="checkbox" id="auto-scroll" checked> 自动滚动</label>
+                <label class="chk" title="勾选时日志跟随最新；滚轮/滚动条上滑会自动暂停，回车跳回最新"><input type="checkbox" id="auto-scroll" checked> 自动滚动</label>
                 <label class="chk"><input type="checkbox" id="show-timestamp" checked> 时间戳</label>
                 <label class="chk"><input type="checkbox" id="show-source" checked> 源头标签</label>
                 <label class="chk"><input type="checkbox" id="auto-hide-toolbar"> 自动隐藏</label>
@@ -643,7 +700,14 @@
         </div>
     </div>
 
-    <div id="log-container"></div>
+    <div id="log-wrap">
+        <div id="log-container" tabindex="0" title="滚轮/滚动条可冻结视图；回车跳到最新"></div>
+        <button type="button" id="log-follow-hint" title="跳转到最新日志">
+            <span id="log-follow-hint-text">有新日志</span>
+            <kbd>Enter</kbd>
+            跳到最新
+        </button>
+    </div>
     <div class="autohide-actions">
         <button type="button" onclick="clearLog()" title="清空日志">清屏</button>
     </div>
@@ -871,6 +935,12 @@
         let suppressEncodingEvent = false;
         let displayCount = 0;
         let lastLogSource = null;
+        // 日志跟随（类 MobaXterm）：滚轮/滚动条离开底部自动冻结，回车/滚回底部恢复
+        let followLogs = true;
+        let logScrollProgrammatic = false;
+        let pausedNewCount = 0;
+        const logFollowHint = document.getElementById('log-follow-hint');
+        const logFollowHintText = document.getElementById('log-follow-hint-text');
 
         const commandHistory = [];
         let historyIndex = -1;
@@ -915,6 +985,7 @@
             if (p.fontSize) { fontSizeRange.value = p.fontSize; setFontSize(p.fontSize); }
             if (p.rxDisplay) rxDisplayMode.value = p.rxDisplay;
             if (typeof p.autoScroll === 'boolean') autoScrollEl.checked = p.autoScroll;
+            followLogs = !!autoScrollEl.checked;
             if (typeof p.showTimestamp === 'boolean') showTimestampEl.checked = p.showTimestamp;
             if (typeof p.showSource === 'boolean') showSourceEl.checked = p.showSource;
             if (typeof p.autoHideToolbar === 'boolean') autoHideToolbarEl.checked = p.autoHideToolbar;
@@ -926,6 +997,7 @@
             if (p.txChecksum) txChecksum.value = p.txChecksum;
             if (p.periodMs) periodMs.value = p.periodMs;
             updatePlaceholder();
+            updateFollowHint();
         }
         if ([...serialEncodingSelect.options].some(o => o.value === defaultEncoding)) {
             serialEncodingSelect.value = defaultEncoding;
@@ -950,14 +1022,136 @@
             document.body.classList.toggle('log-theater');
             updateLogTheaterButton();
             savePrefs();
-            if (autoScrollEl.checked) logContainer.scrollTop = logContainer.scrollHeight;
+            if (followLogs) scrollLogToBottom();
         }
+
+        function isLogScrolledToBottom(threshold) {
+            const t = threshold == null ? 24 : threshold;
+            return logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight < t;
+        }
+
+        function updateFollowHint() {
+            if (!logFollowHint) return;
+            if (followLogs || pausedNewCount <= 0) {
+                logFollowHint.classList.remove('show');
+                return;
+            }
+            if (logFollowHintText) {
+                logFollowHintText.textContent = pausedNewCount > 99
+                    ? '99+ 条新日志'
+                    : (pausedNewCount + ' 条新日志');
+            }
+            logFollowHint.classList.add('show');
+        }
+
+        function setFollowLogs(on, opts) {
+            const options = opts || {};
+            const next = !!on;
+            const changed = followLogs !== next;
+            followLogs = next;
+            if (autoScrollEl.checked !== followLogs) {
+                autoScrollEl.checked = followLogs;
+            }
+            if (followLogs) {
+                pausedNewCount = 0;
+                if (options.scroll !== false) scrollLogToBottom();
+            }
+            updateFollowHint();
+            if (changed && options.save !== false) savePrefs();
+        }
+
+        function scrollLogToBottom() {
+            logScrollProgrammatic = true;
+            logContainer.scrollTop = logContainer.scrollHeight;
+            // 下一帧再清标记，避免 scroll 事件把跟随误关掉
+            requestAnimationFrame(() => {
+                logScrollProgrammatic = false;
+                // 布局稳定后再贴一次底（字体/图片等可能导致高度变化）
+                if (followLogs) {
+                    logScrollProgrammatic = true;
+                    logContainer.scrollTop = logContainer.scrollHeight;
+                    requestAnimationFrame(() => { logScrollProgrammatic = false; });
+                }
+            });
+        }
+
+        function onLogUserScroll() {
+            if (logScrollProgrammatic) return;
+            // 离开底部 → 冻结；滚回底部 → 恢复跟随
+            if (isLogScrolledToBottom()) {
+                if (!followLogs) setFollowLogs(true, { scroll: false });
+            } else if (followLogs) {
+                setFollowLogs(false, { scroll: false });
+            }
+        }
+
+        logContainer.addEventListener('scroll', onLogUserScroll, { passive: true });
+        // 滚轮在已到顶/底时也可能想表达“冻结/查看”，统一交给 scroll 判断即可
+        logContainer.addEventListener('wheel', () => {
+            // 给浏览器应用滚动后再判断位置
+            requestAnimationFrame(onLogUserScroll);
+        }, { passive: true });
+
+        if (logFollowHint) {
+            logFollowHint.addEventListener('click', () => setFollowLogs(true));
+        }
+
+        /** 是否应把 Enter 当作“跳到最新日志”（不拦截真正在输入框里发命令） */
+        function shouldEnterJumpToLatest(target) {
+            if (!target) return true;
+            const tag = (target.tagName || '').toLowerCase();
+            if (tag === 'textarea' || tag === 'select') return false;
+            if (target.isContentEditable) return false;
+            // 多条发送弹窗内不抢 Enter
+            if (target.closest && target.closest('#multi-modal.open')) return false;
+            if (tag === 'input') {
+                const type = (target.type || 'text').toLowerCase();
+                // 复选框/按钮类允许 Enter 跳转；文本输入框保留原行为
+                if (type === 'checkbox' || type === 'radio' || type === 'button' || type === 'submit' || type === 'range') {
+                    return true;
+                }
+                // 命令输入框：有内容时仍发送；空内容且已冻结时 Enter 跳到最新
+                if (target === cmdInput) {
+                    if ((cmdInput.value || '').trim()) return false;
+                    return !followLogs;
+                }
+                return false;
+            }
+            return true;
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeMultiModal();
+                if (document.body.classList.contains('log-theater')) toggleLogTheater();
+                return;
+            }
+            // End 键 / 回车：跳到最新并恢复跟随（类 MobaXterm）
+            if (e.key === 'End' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+                if (shouldEnterJumpToLatest(e.target)) {
+                    e.preventDefault();
+                    setFollowLogs(true);
+                }
+                return;
+            }
+            if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+                if (!followLogs && shouldEnterJumpToLatest(e.target)) {
+                    e.preventDefault();
+                    setFollowLogs(true);
+                }
+            }
+        });
+
         [rxDisplayMode, autoScrollEl, showTimestampEl, showSourceEl, autoHideToolbarEl, txMode, txEol, txChecksum, periodMs].forEach(el => {
             el.addEventListener('change', () => {
                 if (el === txMode) updatePlaceholder();
                 if (el === periodMs && cycleRunning) restartCycle();
                 if (el === rxDisplayMode || el === showTimestampEl || el === showSourceEl) rebuildLogView();
                 if (el === autoHideToolbarEl) updateAutoHideToolbar();
+                if (el === autoScrollEl) {
+                    // 手动勾选「自动滚动」= 立即跟随并跳到底；取消 = 冻结当前位置
+                    setFollowLogs(autoScrollEl.checked, { save: false });
+                }
                 savePrefs();
             });
         });
@@ -989,13 +1183,6 @@
         function onMultiMaskClick(ev) {
             if (ev.target && ev.target.id === 'multi-modal') closeMultiModal();
         }
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                closeMultiModal();
-                if (document.body.classList.contains('log-theater')) toggleLogTheater();
-            }
-        });
-
         function loadMultiItems() {
             try {
                 const raw = JSON.parse(localStorage.getItem(MULTI_KEY) || 'null');
@@ -1614,28 +1801,37 @@
             if (showSource) lastLogSource = source;
             displayCount++;
             updateLogCount();
-            if (autoScrollEl.checked) logContainer.scrollTop = logContainer.scrollHeight;
-        }
-
-        function isLogScrolledToBottom() {
-            return logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight < 10;
+            if (followLogs) {
+                scrollLogToBottom();
+            } else if (!skipStore) {
+                // 冻结期间新到的日志：提示条累计（重建视图不计入）
+                pausedNewCount++;
+                updateFollowHint();
+            }
         }
 
         function rebuildLogView() {
-            const wasAtBottom = isLogScrolledToBottom();
+            const wasFollowing = followLogs;
             const oldScrollTop = logContainer.scrollTop;
+            // 重建期间关闭跟随，避免每条日志都 scroll；结束后再统一贴底
+            const savedFollow = followLogs;
+            followLogs = false;
+            logScrollProgrammatic = true;
             logContainer.innerHTML = '';
             displayCount = 0;
             lastLogSource = null;
             for (const it of logStore) {
                 appendLogEntry(it.source, it.msg, it.seq, it.ts, true, it.hex, true);
             }
+            followLogs = savedFollow;
             updateLogCount();
-            if (wasAtBottom && autoScrollEl.checked) {
-                logContainer.scrollTop = logContainer.scrollHeight;
+            if (wasFollowing) {
+                scrollLogToBottom();
             } else {
                 logContainer.scrollTop = oldScrollTop;
+                requestAnimationFrame(() => { logScrollProgrammatic = false; });
             }
+            updateFollowHint();
         }
 
         async function clearLog() {
@@ -1658,7 +1854,9 @@
             displayCount = 0;
             lastLogSource = null;
             logStore.length = 0;
+            pausedNewCount = 0;
             updateLogCount();
+            updateFollowHint();
         }
 
         // ---------- 导出 TXT（与当前屏幕显示一致） ----------
@@ -2008,6 +2206,11 @@
         cmdInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
+                // 冻结浏览且发送框为空时：回车跳到最新（类 MobaXterm），不发空指令
+                if (!followLogs && !(cmdInput.value || '').trim()) {
+                    setFollowLogs(true);
+                    return;
+                }
                 sendCommand(false);
             } else if (e.key === 'ArrowUp') {
                 e.preventDefault();
