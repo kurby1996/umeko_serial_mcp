@@ -477,6 +477,32 @@
             color: #93c5fd;
             font-family: inherit;
         }
+        #log-copy-hint {
+            position: absolute;
+            left: 50%;
+            bottom: 18px;
+            z-index: 31;
+            padding: 7px 13px;
+            border: 1px solid rgba(52, 211, 153, .55);
+            border-radius: 999px;
+            background: rgba(6, 78, 59, .94);
+            color: #d1fae5;
+            font-size: 12px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
+            opacity: 0;
+            pointer-events: none;
+            transform: translate(-50%, 8px);
+            transition: opacity .15s ease, transform .15s ease;
+        }
+        #log-copy-hint.show {
+            opacity: 1;
+            transform: translate(-50%, 0);
+        }
+        #log-copy-hint.error {
+            border-color: rgba(248, 113, 113, .65);
+            background: rgba(127, 29, 29, .95);
+            color: #fee2e2;
+        }
         .log-entry { margin-bottom: 3px; word-break: break-word; }
         .timestamp { color: #6b7280; }
         .msg-content { white-space: pre-wrap; }
@@ -779,7 +805,7 @@
     </div>
 
     <div id="log-wrap">
-        <div id="log-container" tabindex="0" title="滚轮/滚动条可冻结视图；回车跳到最新"></div>
+        <div id="log-container" tabindex="0" title="拖选文字自动复制；滚轮/滚动条可冻结视图；回车跳到最新"></div>
         <div id="log-search" role="search" aria-label="搜索当前日志">
             <input type="text" id="log-search-input" placeholder="搜索当前界面内容…" autocomplete="off" spellcheck="false" aria-label="搜索文本">
             <span id="log-search-count" aria-live="polite">0 / 0</span>
@@ -792,6 +818,7 @@
             <kbd>Enter</kbd>
             跳到最新
         </button>
+        <div id="log-copy-hint" role="status" aria-live="polite">已复制</div>
     </div>
     <div class="autohide-actions">
         <button type="button" onclick="clearLog()" title="清空日志">清屏</button>
@@ -930,6 +957,7 @@
         const logSearchCount = document.getElementById('log-search-count');
         const logSearchPrev = document.getElementById('log-search-prev');
         const logSearchNext = document.getElementById('log-search-next');
+        const logCopyHint = document.getElementById('log-copy-hint');
 
         const wsPort = {WS_PORT};
         const defaultEncoding = '{DEFAULT_ENCODING}' || 'gbk';
@@ -1033,6 +1061,7 @@
         let logSearchMatches = [];
         let logSearchIndex = -1;
         let logSearchRefreshTimer = null;
+        let logCopyHintTimer = null;
 
         const commandHistory = [];
         let historyIndex = -1;
@@ -1187,6 +1216,62 @@
         if (logFollowHint) {
             logFollowHint.addEventListener('click', () => setFollowLogs(true));
         }
+
+        function showLogCopyHint(message, isError) {
+            clearTimeout(logCopyHintTimer);
+            logCopyHint.textContent = message;
+            logCopyHint.classList.toggle('error', !!isError);
+            logCopyHint.classList.add('show');
+            logCopyHintTimer = setTimeout(() => logCopyHint.classList.remove('show'), 1300);
+        }
+
+        function fallbackCopyText(text, selection) {
+            const savedRanges = [];
+            for (let i = 0; i < selection.rangeCount; i++) {
+                savedRanges.push(selection.getRangeAt(i).cloneRange());
+            }
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'fixed';
+            textarea.style.left = '-9999px';
+            document.body.appendChild(textarea);
+            textarea.select();
+            const copied = document.execCommand('copy');
+            textarea.remove();
+            selection.removeAllRanges();
+            for (const range of savedRanges) selection.addRange(range);
+            if (!copied) throw new Error('copy command failed');
+        }
+
+        async function copySelectedLogText() {
+            const selection = window.getSelection();
+            if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+            const range = selection.getRangeAt(0);
+            if (!logContainer.contains(range.commonAncestorContainer)) return;
+            const text = selection.toString();
+            if (!text) return;
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    fallbackCopyText(text, selection);
+                }
+                showLogCopyHint('已复制 ' + text.length + ' 个字符', false);
+            } catch (error) {
+                try {
+                    fallbackCopyText(text, selection);
+                    showLogCopyHint('已复制 ' + text.length + ' 个字符', false);
+                } catch (_) {
+                    showLogCopyHint('自动复制失败，请按 Ctrl+C', true);
+                }
+            }
+        }
+
+        logContainer.addEventListener('mouseup', () => {
+            // mouseup 本身属于用户手势，可直接调用浏览器剪贴板权限。
+            void copySelectedLogText();
+        });
 
         function clearLogSearchHighlights() {
             if (window.CSS && CSS.highlights) {
