@@ -364,6 +364,84 @@
         #log-container::-webkit-scrollbar-thumb:hover {
             background: #6b7280;
         }
+        #log-search {
+            position: absolute;
+            top: 12px;
+            right: 16px;
+            z-index: 30;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            max-width: calc(100% - 32px);
+            padding: 6px;
+            border: 1px solid rgba(71, 85, 105, .9);
+            border-radius: 10px;
+            background: rgba(15, 23, 42, .96);
+            box-shadow: 0 8px 28px rgba(0, 0, 0, .45);
+            backdrop-filter: blur(8px);
+        }
+        #log-search-input {
+            width: min(280px, 34vw);
+            min-width: 140px;
+            height: 34px;
+            padding: 6px 10px;
+            border: 1px solid #475569;
+            border-radius: 7px;
+            background: #090d14;
+            color: var(--text);
+            font-family: Consolas, "Cascadia Mono", "Microsoft YaHei Mono", monospace;
+            font-size: 13px;
+            outline: none;
+        }
+        #log-search-input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, .2);
+        }
+        #log-search-count {
+            min-width: 58px;
+            color: #cbd5e1;
+            font-size: 12px;
+            text-align: center;
+            white-space: nowrap;
+        }
+        #log-search-count.empty { color: #f87171; }
+        .log-search-btn {
+            height: 34px;
+            min-width: 38px;
+            padding: 5px 9px;
+            border: 1px solid #475569;
+            border-radius: 7px;
+            background: #1e293b;
+            color: #e2e8f0;
+            font-size: 15px;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .log-search-btn:hover:not(:disabled) { background: #334155; }
+        .log-search-btn:disabled { opacity: .45; cursor: default; }
+        .log-search-clear { min-width: auto; padding: 5px 12px; font-size: 13px; }
+        ::highlight(log-search-match) {
+            color: #111827;
+            background: #fde047;
+        }
+        ::highlight(log-search-active) {
+            color: #111827;
+            background: #fb923c;
+            text-decoration: underline 2px #7c2d12;
+        }
+        mark.log-search-fallback {
+            color: #111827;
+            background: #fde047;
+        }
+        mark.log-search-fallback.active { background: #fb923c; }
+        body.toolbar-autohide:not(.log-theater) .autohide-actions { display: none; }
+        body.log-theater .theater-actions { top: 64px; }
+        body.log-theater .theater-actions > button:first-child { display: none; }
+        @media (max-width: 720px) {
+            #log-search { left: 12px; right: 12px; }
+            #log-search-input { flex: 1; width: auto; min-width: 80px; }
+            #log-search-count { min-width: 48px; }
+        }
         /* 冻结跟随：有新日志时提示跳到底部（MobaXterm 风格） */
         #log-follow-hint {
             display: none;
@@ -702,6 +780,13 @@
 
     <div id="log-wrap">
         <div id="log-container" tabindex="0" title="滚轮/滚动条可冻结视图；回车跳到最新"></div>
+        <div id="log-search" role="search" aria-label="搜索当前日志">
+            <input type="text" id="log-search-input" placeholder="搜索当前界面内容…" autocomplete="off" spellcheck="false" aria-label="搜索文本">
+            <span id="log-search-count" aria-live="polite">0 / 0</span>
+            <button type="button" class="log-search-btn" id="log-search-prev" title="上一个（Shift+Enter）" aria-label="上一个匹配">↑</button>
+            <button type="button" class="log-search-btn" id="log-search-next" title="下一个（Enter）" aria-label="下一个匹配">↓</button>
+            <button type="button" class="log-search-btn log-search-clear" onclick="clearLog()" title="清空当前日志">清屏</button>
+        </div>
         <button type="button" id="log-follow-hint" title="跳转到最新日志">
             <span id="log-follow-hint-text">有新日志</span>
             <kbd>Enter</kbd>
@@ -841,6 +926,10 @@
         const multiPageSizeEl = document.getElementById('multi-page-size');
         const logTheaterBtn = document.getElementById('log-theater-btn');
         const theaterExitBtn = document.getElementById('theater-exit-btn');
+        const logSearchInput = document.getElementById('log-search-input');
+        const logSearchCount = document.getElementById('log-search-count');
+        const logSearchPrev = document.getElementById('log-search-prev');
+        const logSearchNext = document.getElementById('log-search-next');
 
         const wsPort = {WS_PORT};
         const defaultEncoding = '{DEFAULT_ENCODING}' || 'gbk';
@@ -941,6 +1030,9 @@
         let pausedNewCount = 0;
         const logFollowHint = document.getElementById('log-follow-hint');
         const logFollowHintText = document.getElementById('log-follow-hint-text');
+        let logSearchMatches = [];
+        let logSearchIndex = -1;
+        let logSearchRefreshTimer = null;
 
         const commandHistory = [];
         let historyIndex = -1;
@@ -1096,6 +1188,145 @@
             logFollowHint.addEventListener('click', () => setFollowLogs(true));
         }
 
+        function clearLogSearchHighlights() {
+            if (window.CSS && CSS.highlights) {
+                CSS.highlights.delete('log-search-match');
+                CSS.highlights.delete('log-search-active');
+            }
+            document.querySelectorAll('mark.log-search-fallback').forEach(mark => {
+                mark.replaceWith(document.createTextNode(mark.textContent || ''));
+            });
+            logContainer.normalize();
+        }
+
+        function makeSearchRange(nodes, start, end) {
+            let offset = 0;
+            let startNode = null, endNode = null, startOffset = 0, endOffset = 0;
+            for (const node of nodes) {
+                const next = offset + node.data.length;
+                if (!startNode && start < next) {
+                    startNode = node;
+                    startOffset = start - offset;
+                }
+                if (end <= next) {
+                    endNode = node;
+                    endOffset = end - offset;
+                    break;
+                }
+                offset = next;
+            }
+            if (!startNode || !endNode) return null;
+            const range = document.createRange();
+            range.setStart(startNode, startOffset);
+            range.setEnd(endNode, endOffset);
+            return range;
+        }
+
+        function paintLogSearchHighlights() {
+            clearLogSearchHighlights();
+            if (!logSearchMatches.length) return;
+            if (window.CSS && CSS.highlights && window.Highlight) {
+                CSS.highlights.set('log-search-match', new Highlight(...logSearchMatches.map(item => item.range)));
+                if (logSearchIndex >= 0) {
+                    CSS.highlights.set('log-search-active', new Highlight(logSearchMatches[logSearchIndex].range));
+                }
+                return;
+            }
+            // 兼容旧浏览器：逐个文本节点高亮；搜索本身仍是普通文本匹配。
+            const ranges = logSearchMatches.map((item, index) => ({ range: item.range, index })).reverse();
+            for (const item of ranges) {
+                try {
+                    const mark = document.createElement('mark');
+                    mark.className = 'log-search-fallback' + (item.index === logSearchIndex ? ' active' : '');
+                    item.range.surroundContents(mark);
+                } catch (_) {}
+            }
+        }
+
+        function updateLogSearchStatus() {
+            const total = logSearchMatches.length;
+            logSearchCount.textContent = total ? ((logSearchIndex + 1) + ' / ' + total) : '0 / 0';
+            logSearchCount.classList.toggle('empty', !!logSearchInput.value && !total);
+            logSearchPrev.disabled = !total;
+            logSearchNext.disabled = !total;
+        }
+
+        function escapeSearchPattern(text) {
+            return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
+        function refreshLogSearch(keepIndex) {
+            clearLogSearchHighlights();
+            logSearchMatches = [];
+            const query = logSearchInput.value;
+            if (query) {
+                // 先转义所有正则元字符：输入内容始终按普通文本逐字搜索。
+                const pattern = new RegExp(escapeSearchPattern(query), 'gi');
+                for (const entry of logContainer.querySelectorAll('.log-entry')) {
+                    const walker = document.createTreeWalker(entry, NodeFilter.SHOW_TEXT);
+                    const nodes = [];
+                    let node;
+                    while ((node = walker.nextNode())) nodes.push(node);
+                    const text = nodes.map(item => item.data).join('');
+                    pattern.lastIndex = 0;
+                    let match;
+                    while ((match = pattern.exec(text)) !== null) {
+                        const found = match.index;
+                        const range = makeSearchRange(nodes, found, found + match[0].length);
+                        if (range) logSearchMatches.push({ range, entry });
+                    }
+                }
+            }
+            if (!logSearchMatches.length) {
+                logSearchIndex = -1;
+            } else if (!keepIndex || logSearchIndex < 0) {
+                logSearchIndex = 0;
+            } else {
+                logSearchIndex = Math.min(logSearchIndex, logSearchMatches.length - 1);
+            }
+            paintLogSearchHighlights();
+            updateLogSearchStatus();
+        }
+
+        function scheduleLogSearchRefresh() {
+            if (!logSearchInput.value) return;
+            clearTimeout(logSearchRefreshTimer);
+            logSearchRefreshTimer = setTimeout(() => refreshLogSearch(true), 80);
+        }
+
+        function moveLogSearch(direction) {
+            if (!logSearchMatches.length) return;
+            logSearchIndex = (logSearchIndex + direction + logSearchMatches.length) % logSearchMatches.length;
+            if (!(window.CSS && CSS.highlights && window.Highlight)) {
+                refreshLogSearch(true);
+            } else {
+                paintLogSearchHighlights();
+                updateLogSearchStatus();
+            }
+            const range = logSearchMatches[logSearchIndex].range;
+            const rect = range.getBoundingClientRect();
+            const containerRect = logContainer.getBoundingClientRect();
+            logScrollProgrammatic = true;
+            logContainer.scrollTop += rect.top - containerRect.top - (logContainer.clientHeight / 2);
+            requestAnimationFrame(() => { logScrollProgrammatic = false; });
+        }
+
+        logSearchInput.addEventListener('input', () => refreshLogSearch(false));
+        logSearchInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                moveLogSearch(e.shiftKey ? -1 : 1);
+            } else if (e.key === 'Escape') {
+                e.stopPropagation();
+                logSearchInput.value = '';
+                refreshLogSearch(false);
+                logSearchInput.blur();
+            }
+        });
+        logSearchPrev.addEventListener('click', () => moveLogSearch(-1));
+        logSearchNext.addEventListener('click', () => moveLogSearch(1));
+        updateLogSearchStatus();
+
         /** 是否应把 Enter 当作“跳到最新日志”（不拦截真正在输入框里发命令） */
         function shouldEnterJumpToLatest(target) {
             if (!target) return true;
@@ -1121,6 +1352,12 @@
         }
 
         document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+                e.preventDefault();
+                logSearchInput.focus();
+                logSearchInput.select();
+                return;
+            }
             if (e.key === 'Escape') {
                 closeMultiModal();
                 if (document.body.classList.contains('log-theater')) toggleLogTheater();
@@ -1801,6 +2038,7 @@
             if (showSource) lastLogSource = source;
             displayCount++;
             updateLogCount();
+            scheduleLogSearchRefresh();
             if (followLogs) {
                 scrollLogToBottom();
             } else if (!skipStore) {
@@ -1832,6 +2070,8 @@
                 requestAnimationFrame(() => { logScrollProgrammatic = false; });
             }
             updateFollowHint();
+            clearTimeout(logSearchRefreshTimer);
+            refreshLogSearch(true);
         }
 
         async function clearLog() {
@@ -1855,6 +2095,11 @@
             lastLogSource = null;
             logStore.length = 0;
             pausedNewCount = 0;
+            clearTimeout(logSearchRefreshTimer);
+            logSearchMatches = [];
+            logSearchIndex = -1;
+            clearLogSearchHighlights();
+            updateLogSearchStatus();
             updateLogCount();
             updateFollowHint();
         }
