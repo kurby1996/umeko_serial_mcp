@@ -3,7 +3,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT">
-  <img src="https://img.shields.io/badge/Version-0.3.0-orange" alt="Version 0.3.0">
+  <img src="https://img.shields.io/badge/Version-0.3.2-orange" alt="Version 0.3.2">
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platform">
 </p>
 
@@ -26,7 +26,7 @@
 | **单条 / 多条** | 发送后内容保留；多条发送弹窗（勾选、循环、分页、导入导出，localStorage 持久化） |
 | **周期发送** | 单条周期 / 多条轮询，周期单位 ms |
 | **编码** | utf-8 / gbk / gb18030（Windows 默认 gbk，兼容 XCOM 中文） |
-| **日志** | 环形缓冲（默认 5000 条）；导出 TXT；MCP 增量 `read_data` |
+| **日志** | 环形缓冲（默认 5000 条）；下位机按 CR/LF 断行（不按空闲超时拆行）；导出 TXT；MCP 增量 `read_data` |
 | **可靠性** | 发送队列串行化；串口异常自动重连；版本/能力握手（旧 Hub 会提示重启） |
 
 ---

@@ -13,11 +13,12 @@ import codecs
 import json
 import os
 import pathlib
+import queue
+import re
 import sys
 import threading
 import time
 import traceback
-import queue
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -40,6 +41,14 @@ AUTO_RECONNECT = os.environ.get("SERIAL_MCP_AUTO_RECONNECT", "1").strip().lower(
     "off",
 )
 TX_QUEUE_SIZE = int(os.environ.get("SERIAL_MCP_TX_QUEUE", "256"))
+# 只按设备发出的 CR/LF 断行；不用空闲超时把半包冲成新行。
+_RX_LINE_SPLIT = re.compile(r"\r\n|\n|\r")
+
+
+def split_rx_lines(buf: str) -> tuple[list[str], str]:
+    """按 CR / LF / CRLF 切开；最后一段若没有行结束符则留作 remainder。"""
+    parts = _RX_LINE_SPLIT.split(buf)
+    return parts[:-1], parts[-1]
 
 
 def default_encoding() -> str:
@@ -109,6 +118,10 @@ class SerialHub:
         self._tx_queue: queue.Queue = queue.Queue(maxsize=max(16, TX_QUEUE_SIZE))
         self._tx_thread = threading.Thread(target=self._tx_worker, name="serial-tx", daemon=True)
         self._tx_thread.start()
+
+        # 下位机 RX 行缓冲：Windows 常把一行拆成多次 read()，必须拼到真正的换行。
+        self._rx_text_buf = ""
+        self._rx_hex_buf = ""
 
     # ---------- ports ----------
     def enumerate_ports(self) -> list[dict]:
@@ -187,6 +200,7 @@ class SerialHub:
         with self.buffer_cv:
             cleared = len(self.buffer)
             self.buffer.clear()
+            self._reset_rx_line_buf()
             # Keep _seq monotonic so existing MCP cursors can safely read logs
             # appended after a clear without replaying pre-clear entries.
             self.buffer_cv.notify_all()
@@ -528,9 +542,49 @@ class SerialHub:
         self.read_thread = None
         if t and t.is_alive() and t is not threading.current_thread():
             t.join(timeout=1.0)
+        self._flush_rx_unlocked()
+
+    def _reset_rx_line_buf(self) -> None:
+        self._rx_text_buf = ""
+        self._rx_hex_buf = ""
+
+    def _flush_rx_unlocked(self) -> None:
+        """断开/出错时把尚未换行的尾巴发出去，避免丢数据。平时不按超时冲刷。"""
+        text = self._rx_text_buf
+        hex_msg = self._rx_hex_buf
+        self._reset_rx_line_buf()
+        if not text and not hex_msg:
+            return
+        self._append_unlocked("HARDWARE", text if text else hex_msg, hex_msg=hex_msg or None)
+
+    def _feed_rx_unlocked(self, text: str, hex_msg: str) -> None:
+        """把本次读到的文本拼进行缓冲；只有遇到 CR/LF 才记一条日志。"""
+        if text:
+            self._rx_text_buf += text
+        if hex_msg:
+            if self._rx_hex_buf:
+                self._rx_hex_buf += " " + hex_msg
+            else:
+                self._rx_hex_buf = hex_msg
+        if not self._rx_text_buf:
+            return
+        complete, remainder = split_rx_lines(self._rx_text_buf)
+        if not complete:
+            return
+        self._rx_text_buf = remainder
+        hex_all = self._rx_hex_buf
+        self._rx_hex_buf = ""
+        last_i = len(complete) - 1
+        for i, line in enumerate(complete):
+            self._append_unlocked(
+                "HARDWARE",
+                line,
+                hex_msg=hex_all if i == last_i else None,
+            )
 
     def _handle_serial_error_unlocked(self, reason: str) -> None:
         """读/写异常时关闭句柄并视配置启动自动重连。"""
+        self._flush_rx_unlocked()
         try:
             if self.active_serial:
                 try:
@@ -593,10 +647,13 @@ class SerialHub:
                 try:
                     data = ser.read(4096)
                     if data:
-                        text = self.decode_bytes(data)
-                        hex_msg = self.bytes_to_hex_display(data)
-                        # 文本可能为空（纯二进制），仍记录 HEX
-                        self.append_log("HARDWARE", text if text else hex_msg, hex_msg=hex_msg)
+                        with self.lock:
+                            text = self.decode_bytes(data)
+                            hex_msg = self.bytes_to_hex_display(data)
+                            self._feed_rx_unlocked(text, hex_msg)
+                            if not self.read_running:
+                                self._flush_rx_unlocked()
+                                break
                     else:
                         time.sleep(0.05)
                 except Exception as e:
