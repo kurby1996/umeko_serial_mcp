@@ -260,10 +260,6 @@
             width: min(480px, 42vw);
             max-width: 100%;
         }
-        #serial-port-input {
-            min-width: 120px;
-            width: 140px;
-        }
         #serial-baud-select { min-width: 100px; }
         #serial-encoding-select { min-width: 110px; }
         #period-ms { width: 88px; }
@@ -740,10 +736,6 @@
                     </select>
                 </div>
                 <button type="button" class="btn secondary" id="refresh-ports-btn" onclick="refreshPorts()">刷新</button>
-                <div class="field">
-                    <span class="lbl">手动</span>
-                    <input type="text" id="serial-port-input" placeholder="COM1" title="也可手动输入端口名">
-                </div>
 
                 <div class="divider"></div>
 
@@ -930,7 +922,6 @@
         const cmdInput = document.getElementById('cmd-input');
         const serialStatusLabel = document.getElementById('serial-status-label');
         const serialPortSelect = document.getElementById('serial-port-select');
-        const serialPortInput = document.getElementById('serial-port-input');
         const serialBaudSelect = document.getElementById('serial-baud-select');
         const serialEncodingSelect = document.getElementById('serial-encoding-select');
         const serialToggleBtn = document.getElementById('serial-toggle-btn');
@@ -2307,7 +2298,7 @@
         }
 
         function applyPortList(ports) {
-            const prev = serialPortSelect.value || serialPortInput.value.trim();
+            const prev = serialPortSelect.value;
             serialPortSelect.innerHTML = '';
             if (!ports.length) {
                 const opt = document.createElement('option');
@@ -2326,9 +2317,6 @@
                 if (prev && [...serialPortSelect.options].some(o => o.value === prev)) {
                     serialPortSelect.value = prev;
                 }
-                if (!serialPortInput.value.trim() && serialPortSelect.value) {
-                    serialPortInput.value = serialPortSelect.value;
-                }
             }
             if (serialState.connected && serialState.port &&
                 ![...serialPortSelect.options].some(o => o.value === serialState.port)) {
@@ -2346,7 +2334,7 @@
             }
         }
         function resolvePort() {
-            return serialPortInput.value.trim() || serialPortSelect.value || '';
+            return serialPortSelect.value || '';
         }
         function buildWriteOptions(modeOverride) {
             return {
@@ -2461,7 +2449,7 @@
             } else {
                 const port = resolvePort();
                 if (!port) {
-                    appendLog('SYSTEM', '请先选择或输入串口。');
+                    appendLog('SYSTEM', '请先选择串口。');
                     return;
                 }
                 ws.send(JSON.stringify({
@@ -2482,8 +2470,6 @@
                 serialStatusLabel.className = 'status-chip on';
                 serialToggleBtn.textContent = '断开';
                 serialToggleBtn.classList.add('danger');
-                serialPortInput.value = serialState.port || '';
-                serialPortInput.disabled = true;
                 serialPortSelect.disabled = true;
                 serialBaudSelect.value = String(serialState.baudrate || 115200);
                 serialBaudSelect.disabled = true;
@@ -2503,7 +2489,6 @@
                 serialStatusLabel.className = 'status-chip off';
                 serialToggleBtn.textContent = '取消重连';
                 serialToggleBtn.classList.add('danger');
-                serialPortInput.disabled = true;
                 serialPortSelect.disabled = true;
                 serialBaudSelect.disabled = true;
                 serialEncodingSelect.disabled = true;
@@ -2512,7 +2497,6 @@
                 serialStatusLabel.className = 'status-chip off';
                 serialToggleBtn.textContent = '连接';
                 serialToggleBtn.classList.remove('danger');
-                serialPortInput.disabled = false;
                 serialPortSelect.disabled = false;
                 serialBaudSelect.disabled = false;
                 serialEncodingSelect.disabled = false;
@@ -2520,9 +2504,6 @@
             suppressEncodingEvent = false;
         }
 
-        serialPortSelect.addEventListener('change', () => {
-            if (serialPortSelect.value) serialPortInput.value = serialPortSelect.value;
-        });
         serialEncodingSelect.addEventListener('change', () => {
             if (suppressEncodingEvent) return;
             if (ws && ws.readyState === WebSocket.OPEN && serialState.connected) {
