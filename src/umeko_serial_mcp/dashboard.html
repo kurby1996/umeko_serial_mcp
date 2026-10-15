@@ -953,7 +953,7 @@
         const wsPort = {WS_PORT};
         const defaultEncoding = '{DEFAULT_ENCODING}' || 'gbk';
         const pageHubVersion = '{HUB_VERSION}' || '';
-        const EXPECTED_FEATURES = ['convert', 'write_options', 'ring_buffer', 'clear_shared_logs', 'auto_reconnect', 'send_queue', 'health_version'];
+        const EXPECTED_FEATURES = ['convert', 'write_options', 'ring_buffer', 'clear_shared_logs', 'auto_reconnect', 'send_queue', 'health_version', 'batched_logs_ack'];
         const wsUrl = 'ws://' + window.location.hostname + ':' + wsPort;
         const apiBase = window.location.origin;
 
@@ -992,6 +992,15 @@
             if (!health || !health.ok) {
                 showVersionBanner('<strong>Hub 健康检查失败。</strong> 请先运行 scripts\\start-hub.bat 并保持窗口不关。');
                 return;
+            }
+            if (health.instance_id) {
+                if (hubInstanceId && hubInstanceId !== health.instance_id) {
+                    // A restarted Hub has a new seq space; discard old dedup/clear watermarks.
+                    seenSeq.clear();
+                    clearedThroughSeq = 0;
+                    clearLogView();
+                }
+                hubInstanceId = health.instance_id;
             }
             const ver = health.version || '';
             const feats = health.features || [];
@@ -1040,6 +1049,7 @@
         let multiCycleRunning = false;
         let multiCycleIndex = 0;
         let seenSeq = new Set();
+        let hubInstanceId = null;
         let suppressEncodingEvent = false;
         let displayCount = 0;
         let lastLogSource = null;
@@ -1066,7 +1076,12 @@
 
         // 内存中保留结构化日志，便于导出（与显示同步）
         const logStore = [];
-        const LOG_STORE_MAX = 8000;
+        const LOG_STORE_MAX = 2000;
+        const LOG_PENDING_MAX = 1000;
+        const pendingLogs = [];
+        let logRenderFrame = null;
+        let skippedLogCount = 0;
+        let clearedThroughSeq = 0;
 
         const PREF_KEY = 'serial_hub_ui_prefs_v2';
         function loadPrefs() {
@@ -1946,7 +1961,8 @@
         function connectWs() {
             if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
             setWsStatus(false, 'WebSocket: 连接中...');
-            ws = new WebSocket(wsUrl);
+            const socket = new WebSocket(wsUrl);
+            ws = socket;
             ws.onopen = () => {
                 reconnectDelay = 1000;
                 setWsStatus(true, 'WebSocket: 已连接（长连）');
@@ -1978,8 +1994,15 @@
                     for (const it of (data.items || [])) {
                         appendLogEntry(it.source, it.msg, it.seq, it.ts, true, it.hex);
                     }
+                } else if (data.type === 'logs') {
+                    skippedLogCount += data.skipped || 0;
+                    for (const it of (data.items || [])) {
+                        appendLogEntry(it.source, it.msg, it.seq, it.ts, false, it.hex);
+                    }
+                    const items = data.items || [];
+                    socket.send(JSON.stringify({ action: 'logs_ack', seq: items.length ? items[items.length - 1].seq : null }));
                 } else if (data.type === 'logs_cleared') {
-                    clearLogView();
+                    applyLogClear(data.through_seq);
                 } else if (data.type === 'pong') {
                 } else if (data.source) {
                     appendLogEntry(data.source, data.msg, data.seq, data.ts, false, data.hex);
@@ -2024,9 +2047,11 @@
             }
         }
 
+        const logTimeFormatter = new Intl.DateTimeFormat('en-US', {
+            hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
         function formatTime(ts) {
-            if (ts) return new Date(ts * 1000).toLocaleTimeString('en-US', { hour12: false });
-            return new Date().toLocaleTimeString('en-US', { hour12: false });
+            return logTimeFormatter.format(ts ? new Date(ts * 1000) : new Date());
         }
 
         function highlightKeywords(html) {
@@ -2047,18 +2072,19 @@
             const textHtml = highlightKeywords(
                 escapeHtml(raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
             ).replace(/\n/g, '<br>');
+            if (mode === 'text') return textHtml;
             const hex = hexFromServer || '';
             const hexHtml = hex
                 ? `<span class="msg-hex">${highlightKeywords(escapeHtml(hex))}</span>`
                 : '';
-            if (mode === 'text') return textHtml;
             if (mode === 'hex') return hexHtml || textHtml;
             if (hex) return `${textHtml}<br>${hexHtml}`;
             return textHtml;
         }
 
         function updateLogCount() {
-            logCountLabel.textContent = '日志: ' + displayCount + ' 条';
+            logCountLabel.textContent = '日志: ' + displayCount + ' 条'
+                + (skippedLogCount ? ' · 实时显示已跳过 ' + skippedLogCount + ' 条' : '');
         }
 
         function pushStore(entry) {
@@ -2073,6 +2099,42 @@
         }
 
         function appendLogEntry(source, msg, seq, ts, isHistory, hexMsg, skipStore) {
+            if (seq != null && seq <= clearedThroughSeq) return;
+            pendingLogs.push([source, msg, seq, ts, isHistory, hexMsg, skipStore]);
+            if (pendingLogs.length > LOG_PENDING_MAX) {
+                const excess = pendingLogs.length - LOG_PENDING_MAX;
+                pendingLogs.splice(0, excess);
+                skippedLogCount += excess;
+            }
+            if (logRenderFrame == null) logRenderFrame = requestAnimationFrame(flushPendingLogs);
+        }
+
+        function flushPendingLogs() {
+            logRenderFrame = null;
+            const fragment = document.createDocumentFragment();
+            const deadline = performance.now() + 8;
+            let count = 0;
+            while (pendingLogs.length && count < 200 && performance.now() < deadline) {
+                renderLogEntry(...pendingLogs.shift(), fragment);
+                count++;
+            }
+            logContainer.appendChild(fragment);
+            finishLogRender();
+            if (pendingLogs.length) logRenderFrame = requestAnimationFrame(flushPendingLogs);
+        }
+
+        function finishLogRender() {
+            while (logContainer.childElementCount > LOG_STORE_MAX) {
+                logContainer.firstElementChild.remove();
+            }
+            displayCount = logContainer.childElementCount;
+            updateLogCount();
+            scheduleLogSearchRefresh();
+            if (followLogs) scrollLogToBottom();
+            else updateFollowHint();
+        }
+
+        function renderLogEntry(source, msg, seq, ts, isHistory, hexMsg, skipStore, target) {
             const timeStr = formatTime(ts);
             if (!skipStore) {
                 if (seq != null) {
@@ -2110,17 +2172,12 @@
                 ? `<span class="timestamp">[${timeStr}]</span> `
                 : '';
             div.innerHTML = timestampPart + sourcePart + `<span class="msg-content">${htmlMsg}</span>`;
-            logContainer.appendChild(div);
+            (target || logContainer).appendChild(div);
             if (showSource) lastLogSource = source;
             displayCount++;
-            updateLogCount();
-            scheduleLogSearchRefresh();
-            if (followLogs) {
-                scrollLogToBottom();
-            } else if (!skipStore) {
+            if (!followLogs && !skipStore) {
                 // 冻结期间新到的日志：提示条累计（重建视图不计入）
                 pausedNewCount++;
-                updateFollowHint();
             }
         }
 
@@ -2134,9 +2191,11 @@
             logContainer.innerHTML = '';
             displayCount = 0;
             lastLogSource = null;
+            const fragment = document.createDocumentFragment();
             for (const it of logStore) {
-                appendLogEntry(it.source, it.msg, it.seq, it.ts, true, it.hex, true);
+                renderLogEntry(it.source, it.msg, it.seq, it.ts, true, it.hex, true, fragment);
             }
+            logContainer.appendChild(fragment);
             followLogs = savedFollow;
             updateLogCount();
             if (wasFollowing) {
@@ -2159,13 +2218,30 @@
                 });
                 const data = await resp.json();
                 if (!resp.ok || !data.ok) throw new Error(data.error || ('HTTP ' + resp.status));
-                clearLogView();
+                applyLogClear(data.through_seq);
             } catch (e) {
                 appendLog('SYSTEM', 'Shared log clear failed: ' + (e.message || e));
             }
         }
 
+        function applyLogClear(throughSeq) {
+            if (throughSeq == null) { clearLogView(); return; } // Older Hub compatibility.
+            if (throughSeq < clearedThroughSeq) return;
+            clearedThroughSeq = throughSeq;
+            const kept = logStore.filter(it => it.seq != null && it.seq > throughSeq);
+            const queued = pendingLogs.filter(it => it[2] != null && it[2] > throughSeq);
+            clearLogView();
+            logStore.push(...kept);
+            pendingLogs.push(...queued);
+            rebuildLogView();
+            if (pendingLogs.length) logRenderFrame = requestAnimationFrame(flushPendingLogs);
+        }
+
         function clearLogView() {
+            if (logRenderFrame != null) cancelAnimationFrame(logRenderFrame);
+            logRenderFrame = null;
+            pendingLogs.length = 0;
+            skippedLogCount = 0;
             logContainer.innerHTML = '';
             displayCount = 0;
             lastLogSource = null;

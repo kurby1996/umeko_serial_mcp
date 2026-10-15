@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -27,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 import serial
 import serial.tools.list_ports
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from umeko_serial_mcp.version import HUB_API_PATHS, HUB_FEATURES, HUB_VERSION
 
@@ -34,6 +36,9 @@ SUPPORTED_ENCODINGS = ("utf-8", "gbk", "gb18030")
 DEFAULT_HTTP_PORT = int(os.environ.get("SERIAL_MCP_HTTP_PORT", "8080"))
 DEFAULT_HOST = os.environ.get("SERIAL_MCP_HOST", "127.0.0.1")
 BUFFER_MAX = int(os.environ.get("SERIAL_MCP_BUFFER_MAX", "5000"))
+WS_BATCH_MAX = 500
+WS_SEND_TIMEOUT = 2.0
+WS_ACK_TIMEOUT = 5.0
 AUTO_RECONNECT = os.environ.get("SERIAL_MCP_AUTO_RECONNECT", "1").strip().lower() not in (
     "0",
     "false",
@@ -77,6 +82,11 @@ def normalize_encoding(encoding: str) -> str:
     return normalized
 
 
+class LogReceipt(asyncio.Event):
+    """Acknowledgement for exactly one in-flight batch."""
+    seq: int = 0
+
+
 class SerialHub:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -92,6 +102,7 @@ class SerialHub:
             "version": HUB_VERSION,
         }
         self._seq = 0
+        self.instance_id = uuid.uuid4().hex
         self.buffer: deque[dict[str, Any]] = deque(maxlen=BUFFER_MAX)
         self.buffer_cv = threading.Condition(self.lock)
         self.read_thread: threading.Thread | None = None
@@ -170,7 +181,6 @@ class SerialHub:
                 entry["hex"] = hex_msg
             self.buffer.append(entry)
             self.buffer_cv.notify_all()
-        self.broadcast_log(entry)
         return entry
 
     def read_since(self, cursor: int = 0, limit: int = 200) -> dict[str, Any]:
@@ -201,10 +211,11 @@ class SerialHub:
             cleared = len(self.buffer)
             self.buffer.clear()
             self._reset_rx_line_buf()
+            cleared_through = self._seq
             # Keep _seq monotonic so existing MCP cursors can safely read logs
             # appended after a clear without replaying pre-clear entries.
             self.buffer_cv.notify_all()
-        self.broadcast_event({"type": "logs_cleared", "cleared": cleared})
+        self.broadcast_event({"type": "logs_cleared", "cleared": cleared, "through_seq": cleared_through})
         return cleared
 
     # ---------- serial ops ----------
@@ -485,6 +496,7 @@ class SerialHub:
         return {
             "ok": True,
             "role": "serial-hub",
+            "instance_id": self.instance_id,
             "version": HUB_VERSION,
             "features": list(HUB_FEATURES),
             "api": list(HUB_API_PATHS),
@@ -521,8 +533,6 @@ class SerialHub:
             entry["hex"] = hex_msg
         self.buffer.append(entry)
         self.buffer_cv.notify_all()
-        # 直接调度到 WS 事件循环，不再每条日志新建线程
-        self.broadcast_log(entry)
         return entry
 
     def _broadcast_status_unlocked(self) -> None:
@@ -666,33 +676,40 @@ class SerialHub:
                 time.sleep(0.2)
 
     # ---------- websocket broadcast ----------
-    def broadcast_log(self, entry: dict[str, Any]) -> None:
-        if not self.ws_loop or not self.ws_clients:
-            return
-        payload_obj = {
-            "source": entry["source"],
-            "msg": entry["msg"],
-            "seq": entry["seq"],
-            "ts": entry["ts"],
-        }
-        if entry.get("hex") is not None:
-            payload_obj["hex"] = entry["hex"]
-        payload = json.dumps(payload_obj, ensure_ascii=False)
-
-        def _send() -> None:
-            dead = []
-            for ws in list(self.ws_clients):
+    async def stream_logs(self, websocket, cursor: int, receipt: LogReceipt) -> None:
+        """One bounded sender per viewer; MCP retains its independent ring cursor."""
+        while True:
+            await asyncio.sleep(0.05)
+            with self.lock:
+                latest = self._seq
+                # Inspect only the bounded tail, never enqueue one task per line.
+                items = [e for e in list(self.buffer)[-WS_BATCH_MAX:] if e["seq"] > cursor]
+            if not items:
+                cursor = max(cursor, latest)  # Includes a shared-buffer clear.
+                continue
+            skipped = max(0, items[0]["seq"] - cursor - 1)
+            payload = json.dumps(
+                {"type": "logs", "items": items, "skipped": skipped}, ensure_ascii=False
+            )
+            try:
+                receipt.clear()
+                receipt.seq = items[-1]["seq"]
+                await asyncio.wait_for(websocket.send(payload), timeout=WS_SEND_TIMEOUT)
+                # Socket send completion doesn't mean the browser processed it.
+                # Keep at most one batch in flight until its onmessage acknowledges.
+                await asyncio.wait_for(receipt.wait(), timeout=WS_ACK_TIMEOUT)
+            except asyncio.TimeoutError:
+                # A stalled browser must not build an unbounded socket/task backlog.
+                await websocket.close(code=1013, reason="Log viewer too slow; reconnect for latest logs")
+                return
+            except (ConnectionClosed, OSError):
+                self.ws_clients.discard(websocket)
                 try:
-                    asyncio.create_task(ws.send(payload))
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                self.ws_clients.discard(ws)
-
-        try:
-            self.ws_loop.call_soon_threadsafe(_send)
-        except Exception:
-            pass
+                    await websocket.close()
+                except (ConnectionClosed, OSError):
+                    pass
+                return
+            cursor = items[-1]["seq"]
 
     def broadcast_status(self, status: dict[str, Any] | None = None) -> None:
         if not self.ws_loop or not self.ws_clients:
@@ -820,8 +837,10 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
                 _json_response(self, 200, {"ok": ok, "message": msg, "status": hub.get_status()})
                 return
             if path == "/api/clear-logs":
-                cleared = hub.clear_logs()
-                _json_response(self, 200, {"ok": True, "cleared": cleared, "status": hub.get_status()})
+                with hub.lock:
+                    cleared = hub.clear_logs()
+                    through_seq = hub._seq
+                _json_response(self, 200, {"ok": True, "cleared": cleared, "through_seq": through_seq, "status": hub.get_status()})
                 return
             if path == "/api/close":
                 msg = hub.close()
@@ -905,6 +924,9 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
 
 
 async def _ws_handler(websocket) -> None:
+    sender = None
+    receipt = LogReceipt()
+    # Subscribe to clear/status events before awaiting the initial snapshot.
     hub.ws_clients.add(websocket)
     try:
         # 连接后：健康/版本 + 状态 + 串口列表 + 最近日志
@@ -913,18 +935,24 @@ async def _ws_handler(websocket) -> None:
         )
         await websocket.send(json.dumps({"type": "status", **hub.get_status()}, ensure_ascii=False))
         await websocket.send(json.dumps({"type": "ports", "ports": hub.enumerate_ports()}, ensure_ascii=False))
-        recent = hub.recent(200)
+        with hub.lock:
+            recent = list(hub.buffer)[-200:]
+            cursor = hub._seq
         if recent:
             await websocket.send(
                 json.dumps({"type": "history", "items": recent}, ensure_ascii=False)
             )
+        sender = asyncio.create_task(hub.stream_logs(websocket, cursor, receipt))
         async for message in websocket:
             try:
                 data = json.loads(message)
             except Exception:
                 continue
             action = data.get("action")
-            if action == "write":
+            if action == "logs_ack":
+                if data.get("seq") == receipt.seq:
+                    receipt.set()
+            elif action == "write":
                 payload = data.get("payload", "")
                 opts = data.get("options") or {}
                 # 兼容扁平字段
@@ -963,6 +991,9 @@ async def _ws_handler(websocket) -> None:
                 await websocket.send(json.dumps({"type": "pong", "ts": time.time()}, ensure_ascii=False))
     finally:
         hub.ws_clients.discard(websocket)
+        if sender is not None:
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
 
 
 def _run_ws(host: str, ws_port: int) -> None:

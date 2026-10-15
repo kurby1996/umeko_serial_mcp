@@ -1,7 +1,7 @@
 """统一版本与能力声明（Hub / MCP / 网页握手用）。"""
 
 # 与 pyproject.toml version 保持同步
-HUB_VERSION = "0.3.2"
+HUB_VERSION = "0.3.3"
 
 # 网页/MCP 期望的最低 Hub 版本（主.次 比较用字符串，要求完整实现下列 features）
 MIN_HUB_VERSION = "0.3.1"
@@ -15,6 +15,7 @@ HUB_FEATURES = (
     "auto_reconnect",
     "send_queue",
     "health_version",
+    "batched_logs_ack",
 )
 
 # HTTP API 路径清单（文档与握手）
